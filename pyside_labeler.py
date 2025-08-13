@@ -822,29 +822,13 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self._navigating = True
         # Update list item text/icon
         li = self._find_list_row_by_index(row_idx)
-        if unlabeled_only and label_val:
-            # remove from filtered view
-            if row_idx in self.filtered_indices:
-                try:
-                    pos = self.filtered_indices.index(row_idx)
-                    self.filtered_indices.pop(pos)
-                    if 0 <= li:
-                        self.table_preview.removeRow(li)
-                    # keep current_idx pointing to next item
-                    if self.current_idx >= len(self.filtered_indices):
-                        self.current_idx = max(0, len(self.filtered_indices) - 1)
-                    removed = True
-                except Exception:
-                    pass
-        else:
-            if 0 <= li:
-                # update label flag and value
-                self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
-                self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
+        if 0 <= li:
+            # Always keep the row visible; just update columns
+            self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
+            self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
         # Force auto-advance to the immediate next row within current filtered order
-        if not removed:
-            if self.current_idx < len(self.filtered_indices) - 1:
-                self.current_idx += 1
+        if self.current_idx < len(self.filtered_indices) - 1:
+            self.current_idx += 1
         # Clamp if at end
         if self.current_idx >= len(self.filtered_indices):
             self.current_idx = max(0, len(self.filtered_indices) - 1)
