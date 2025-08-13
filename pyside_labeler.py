@@ -7,6 +7,12 @@ import json
 import hashlib
 import re
 from datetime import datetime
+try:
+    # Python 3.11+
+    from datetime import UTC as _UTC
+except Exception:
+    from datetime import timezone as _tz
+    _UTC = _tz.utc
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -72,12 +78,18 @@ def load_label_store(json_path: str) -> dict:
     return {"version": 1, "updated_at": None, "labels": {}}
 
 
-def save_label_store(json_path: str, store: dict) -> None:
-    store["updated_at"] = datetime.utcnow().isoformat()
-    tmp = json_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, json_path)
+def save_label_store(json_path: str, store: dict) -> bool:
+    """Atomically persist the label store. Returns True on success."""
+    try:
+        store["updated_at"] = datetime.now(_UTC).isoformat()
+        tmp = json_path + ".tmp"
+        os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(store, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, json_path)
+        return True
+    except Exception:
+        return False
 
 
 def apply_json_to_excel(json_path: str, xlsx_path: str, sheet_name: str, col_indices: Dict[str, int], df: pd.DataFrame) -> int:
@@ -202,6 +214,13 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.fit_to_window: bool = True
         # Persist settings
         self.settings = QtCore.QSettings("rtm", "pyside_labeler")
+        # Batched JSON save
+        self._pending_ops: List[Tuple[str, int, Dict[str, object], Dict[str, str]]] = []
+        self._pending_json_path: str = ""
+        self._save_timer = QtCore.QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(150)  # ms
+        self._save_timer.timeout.connect(self._flush_pending_ops)
 
         # UI
         self._build_ui()
@@ -659,6 +678,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if not out:
             return
         try:
+            # Ensure pending JSON updates are flushed before exporting
+            self._flush_pending_ops()
             # Ensure workbook has all label columns and get indices
             wb = load_workbook(self.excel_path)
             ws = wb[self.sheet_name]
@@ -705,26 +726,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
             return
         value = opts[choice_index]
         row_idx = self.filtered_indices[self.current_idx]
-        # Save to JSON immediately
-        row = self.df.loc[row_idx]
-        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
-        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
-        store = load_label_store(json_path)
-        key = str(row_idx)
-        entry = store["labels"].get(key) or {}
-        for k, v in keys_for_row.items():
-            entry[k] = v
-        values = entry.get("values") or {}
-        values[self.active_label_col] = value
-        entry["values"] = values
-        store["labels"][key] = entry
-        save_label_store(json_path, store)
         # Reflect in DataFrame immediately for UI updates
         try:
             self.df.at[row_idx, self.active_label_col] = value
         except Exception:
             pass
-        self.status.showMessage(f"Saved to JSON: {self.active_label_col}={value}")
+        # Queue JSON save (batched)
+        row = self.df.loc[row_idx]
+        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
+        self._queue_set_values(row_idx, {self.active_label_col: value}, keys_for_row)
+        self.status.showMessage(f"Queued save: {self.active_label_col}={value}")
         self.log(f"Label saved: row {row_idx} {self.active_label_col}={value}")
         # Keep working order stable; update list/stats without re-sorting
         self._after_label_saved(row_idx)
@@ -736,25 +747,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if self.df is None or not self.filtered_indices:
             return
         row_idx = self.filtered_indices[self.current_idx]
-        row = self.df.loc[row_idx]
-        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
-        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
-        store = load_label_store(json_path)
-        key = str(row_idx)
-        entry = store["labels"].get(key) or {}
-        for k, v in keys_for_row.items():
-            entry[k] = v
-        values = entry.get("values") or {}
-        values[self.active_label_col] = text
-        entry["values"] = values
-        store["labels"][key] = entry
-        save_label_store(json_path, store)
         # Reflect in DataFrame immediately
         try:
             self.df.at[row_idx, self.active_label_col] = text
         except Exception:
             pass
-        self.status.showMessage(f"Saved to JSON: {self.active_label_col}={text}")
+        # Queue JSON save (batched)
+        row = self.df.loc[row_idx]
+        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
+        self._queue_set_values(row_idx, {self.active_label_col: text}, keys_for_row)
+        self.status.showMessage(f"Queued save: {self.active_label_col}={text}")
         self.log(f"Label saved: row {row_idx} {self.active_label_col}={text}")
         # Keep working order stable; update list/stats without re-sorting
         self._after_label_saved(row_idx)
@@ -828,6 +830,15 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 # update label flag and value
                 self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
                 self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
+        # if user sorted by label/value, keep the sort live
+        try:
+            header = self.table_preview.horizontalHeader()
+            col = header.sortIndicatorSection()
+            order = header.sortIndicatorOrder()
+            if col is not None and col >= 0 and self.table_preview.rowCount() > 0:
+                self.table_preview.sortByColumn(col, order)
+        except Exception:
+            pass
         # Auto-advance
         if not removed:
             if self.current_idx < len(self.filtered_indices) - 1:
@@ -995,8 +1006,13 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # update indices/preview list
         self.filtered_indices = list(df.index)
         self.current_idx = 0 if self.filtered_indices else 0
+        # Preserve current sort
+        header = self.table_preview.horizontalHeader()
+        sort_col = header.sortIndicatorSection() if hasattr(header, 'sortIndicatorSection') else -1
+        sort_order = header.sortIndicatorOrder() if hasattr(header, 'sortIndicatorOrder') else QtCore.Qt.AscendingOrder
         # Populate preview table (no artificial cap)
         self.table_preview.blockSignals(True)
+        self.table_preview.setSortingEnabled(False)
         self.table_preview.clearContents()
         self.table_preview.setRowCount(len(self.filtered_indices))
         for r, idx in enumerate(self.filtered_indices):
@@ -1008,6 +1024,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.table_preview.setItem(r, 1, QtWidgets.QTableWidgetItem(label_flag))
             self.table_preview.setItem(r, 2, QtWidgets.QTableWidgetItem(disp))
             self.table_preview.setItem(r, 3, QtWidgets.QTableWidgetItem(label_val))
+        self.table_preview.setSortingEnabled(True)
+        # Re-apply preserved sort if any
+        if sort_col is not None and sort_col >= 0 and self.table_preview.rowCount() > 0:
+            self.table_preview.sortByColumn(sort_col, sort_order)
         self.table_preview.blockSignals(False)
         # default-select the top-most row
         if self.filtered_indices and self.table_preview.rowCount() > 0:
@@ -1038,7 +1058,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
             if self.filtered_indices and 0 <= self.current_idx < len(self.filtered_indices):
                 self.table_preview.blockSignals(True)
                 self.table_preview.clearSelection()
-                self.table_preview.selectRow(self.current_idx)
+                sel_idx = self.filtered_indices[self.current_idx]
+                row_in_table = self._find_list_row_by_index(sel_idx)
+                if row_in_table >= 0:
+                    self.table_preview.selectRow(row_in_table)
                 self.table_preview.blockSignals(False)
         except Exception:
             pass
@@ -1105,6 +1128,46 @@ class LabelerWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    # -------- Batched JSON save helpers --------
+    def _queue_update(self, row_idx: int, updater: Dict[str, object]) -> None:
+        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
+        self._pending_json_path = json_path
+        self._pending_ops.append(("meta", row_idx, updater, {}))
+        self._save_timer.start()
+
+    def _queue_set_values(self, row_idx: int, values: Dict[str, str], keys_for_row: Dict[str, str]) -> None:
+        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
+        self._pending_json_path = json_path
+        self._pending_ops.append(("values", row_idx, values, keys_for_row))
+        self._save_timer.start()
+
+    def _flush_pending_ops(self) -> None:
+        if not self._pending_ops:
+            return
+        json_path = self._pending_json_path or (self.json_path or default_json_path(self.output_excel_path or self.excel_path))
+        store = load_label_store(json_path)
+        for kind, row_idx, payload, keys_for_row in self._pending_ops:
+            key = str(row_idx)
+            entry = store["labels"].get(key) or {}
+            # Ensure identity keys present
+            for k, v in keys_for_row.items():
+                entry[k] = v
+            if kind == "values":
+                vals = entry.get("values") or {}
+                for k, v in payload.items():
+                    vals[k] = v
+                entry["values"] = vals
+            else:
+                for k, v in payload.items():
+                    entry[k] = v
+            store["labels"][key] = entry
+        ok = save_label_store(json_path, store)
+        self._pending_ops.clear()
+        if ok:
+            self.status.showMessage("Saved JSON")
+        else:
+            self.status.showMessage("Save JSON failed")
+
     def reset_filters(self) -> None:
         if self.df is None:
             return
@@ -1128,18 +1191,25 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if not rows:
             return
         row = rows[0].row()
-        if 0 <= row < len(self.filtered_indices):
-            self.current_idx = row
-            self.refresh_view()
+        try:
+            idx_item = self.table_preview.item(row, 0)
+            if not idx_item:
+                return
+            df_idx = int(idx_item.text())
+            if df_idx in self.filtered_indices:
+                self.current_idx = self.filtered_indices.index(df_idx)
+                self.refresh_view()
+        except Exception:
+            pass
 
     def on_toggle_bookmark(self) -> None:
         if self.df is None or not self.filtered_indices:
             return
         row_idx = self.filtered_indices[self.current_idx]
-        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
-        entry = get_json_entry(json_path, row_idx)
+        entry = get_json_entry(self.json_path or default_json_path(self.output_excel_path or self.excel_path), row_idx)
         curr = bool(entry.get("bookmark", False))
-        upsert_json_entry(json_path, row_idx, {"bookmark": not curr})
+        # Queue bookmark toggle
+        self._queue_update(row_idx, {"bookmark": not curr})
         self.status.showMessage("Bookmark " + ("ON" if not curr else "OFF"))
         self.log(f"Bookmark {'ON' if not curr else 'OFF'} for row {row_idx}")
 
@@ -1148,9 +1218,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
             return
         row_idx = self.filtered_indices[self.current_idx]
         memo = self.edt_memo.toPlainText()
-        json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
-        upsert_json_entry(json_path, row_idx, {"memo": memo})
-        self.status.showMessage("Memo saved")
+        # Queue memo save
+        self._queue_update(row_idx, {"memo": memo})
+        self.status.showMessage("Memo queued")
         self.log(f"Memo saved for row {row_idx} ({len(memo)} chars)")
 
     def _resolve_img_for_row(self, row_idx: int) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
