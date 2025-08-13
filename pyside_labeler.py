@@ -186,6 +186,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
 
     def _build_ui(self) -> None:
         self.status = self.statusBar()
+        # Permanent status widgets (INF/ORG indicator)
+        self.lbl_status_io = QtWidgets.QLabel("")
+        self.lbl_status_io.setStyleSheet("font-weight:600; padding-left:8px;")
+        self.status.addPermanentWidget(self.lbl_status_io)
 
         # Menus
         file_menu = self.menuBar().addMenu("File")
@@ -276,6 +280,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.cmb_label_state.addItems(["All", "Labeled", "Unlabeled"])  # stronger label filter
         self.cmb_sort_col = QtWidgets.QComboBox()
         self.chk_sort_desc = QtWidgets.QCheckBox("Desc")
+        self.btn_clear_sort = QtWidgets.QPushButton("Clear sort")
+        self.btn_clear_sort.clicked.connect(self.on_clear_sort)
         self.btn_apply_filter = QtWidgets.QPushButton("Apply")
         self.btn_reset_filter = QtWidgets.QPushButton("Reset")
         self.btn_apply_filter.clicked.connect(self.apply_filters)
@@ -290,6 +296,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         fl.addWidget(QtWidgets.QLabel("Sort by"), 4, 0)
         fl.addWidget(self.cmb_sort_col, 4, 1)
         fl.addWidget(self.chk_sort_desc, 4, 2)
+        fl.addWidget(self.btn_clear_sort, 4, 3)
         fl.addWidget(self.btn_apply_filter, 5, 1)
         fl.addWidget(self.btn_reset_filter, 5, 2)
         right_layout.addWidget(grp_filter)
@@ -360,9 +367,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
         left_v = QtWidgets.QVBoxLayout(left_container)
         self.lbl_banner = QtWidgets.QLabel("Status: -")
         self.lbl_banner.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_banner.setMinimumHeight(40)
+        self.lbl_banner.setMinimumHeight(28)
+        self.lbl_banner.setMaximumHeight(36)
         self.lbl_banner.setStyleSheet(
-            "font-size: 18px; font-weight: 600; padding: 6px; border-radius: 6px;"
+            "font-size: 24px; font-weight: 800; padding: 4px; border-radius: 4px;"
         )
         left_v.addWidget(self.lbl_banner)
         left_v.addWidget(images_split)
@@ -640,10 +648,15 @@ class LabelerWindow(QtWidgets.QMainWindow):
         entry["values"] = values
         store["labels"][key] = entry
         save_label_store(json_path, store)
+        # Reflect in DataFrame immediately for UI updates
+        try:
+            self.df.at[row_idx, self.active_label_col] = value
+        except Exception:
+            pass
         self.status.showMessage(f"Saved to JSON: {self.active_label_col}={value}")
         self.log(f"Label saved: row {row_idx} {self.active_label_col}={value}")
-        # Auto next
-        self.on_next()
+        # Keep working order stable; update list/stats without re-sorting
+        self._after_label_saved(row_idx)
 
     def on_select_choice(self, text: str) -> None:
         if not text or text == "Select…":
@@ -665,9 +678,97 @@ class LabelerWindow(QtWidgets.QMainWindow):
         entry["values"] = values
         store["labels"][key] = entry
         save_label_store(json_path, store)
+        # Reflect in DataFrame immediately
+        try:
+            self.df.at[row_idx, self.active_label_col] = text
+        except Exception:
+            pass
         self.status.showMessage(f"Saved to JSON: {self.active_label_col}={text}")
         self.log(f"Label saved: row {row_idx} {self.active_label_col}={text}")
-        self.on_next()
+        # Keep working order stable; update list/stats without re-sorting
+        self._after_label_saved(row_idx)
+
+    def _find_list_row_by_index(self, idx: int) -> int:
+        try:
+            for i in range(self.list_preview.count()):
+                if self.list_preview.item(i).text().startswith(f"{idx}:"):
+                    return i
+        except Exception:
+            pass
+        return -1
+
+    def _select_current_in_list(self) -> None:
+        try:
+            if self.filtered_indices:
+                sel_idx = self.filtered_indices[self.current_idx]
+                i = self._find_list_row_by_index(sel_idx)
+                if i >= 0:
+                    self.list_preview.setCurrentRow(i)
+        except Exception:
+            pass
+
+    def _update_stats_quick(self) -> None:
+        try:
+            total = len(self.df) if self.df is not None else 0
+            overall_unlabeled = 0
+            overall_labeled = 0
+            if self.df is not None and self.active_label_col in self.df.columns:
+                overall_unlabeled = int(((self.df[self.active_label_col].isna()) | (self.df[self.active_label_col] == "")).sum())
+                overall_labeled = total - overall_unlabeled
+            f_total = len(self.filtered_indices)
+            f_labeled = 0
+            f_unlabeled = 0
+            if f_total > 0 and self.active_label_col in self.df.columns:
+                sub = self.df.loc[self.filtered_indices, self.active_label_col]
+                f_unlabeled = int(((sub.isna()) | (sub == "")).sum())
+                f_labeled = f_total - f_unlabeled
+            self.lbl_stats.setText(
+                f"Filtered: {f_total} | Labeled: {f_labeled} | Unlabeled: {f_unlabeled}  ||  Overall: {total} (L:{overall_labeled} U:{overall_unlabeled})"
+            )
+        except Exception:
+            pass
+
+    def _after_label_saved(self, row_idx: int) -> None:
+        # Update current list item or remove it if filtered out
+        state = self.cmb_label_state.currentText()
+        unlabeled_only = (state == "Unlabeled") or self.chk_unlabeled.isChecked()
+        label_val = str(self.df.loc[row_idx].get(self.active_label_col, "")) if (self.df is not None and self.active_label_col in self.df.columns) else ""
+        removed = False
+        # Update list item text/icon
+        li = self._find_list_row_by_index(row_idx)
+        if unlabeled_only and label_val:
+            # remove from filtered view
+            if row_idx in self.filtered_indices:
+                try:
+                    pos = self.filtered_indices.index(row_idx)
+                    self.filtered_indices.pop(pos)
+                    if 0 <= li:
+                        self.list_preview.takeItem(li)
+                    # keep current_idx pointing to next item
+                    if self.current_idx >= len(self.filtered_indices):
+                        self.current_idx = max(0, len(self.filtered_indices) - 1)
+                    removed = True
+                except Exception:
+                    pass
+        else:
+            if 0 <= li:
+                text = self.list_preview.item(li).text()
+                prefix = "✅" if label_val else "⏳"
+                try:
+                    # replace after "idx: " prefix
+                    rest = text.split(":", 1)[1].strip()
+                except Exception:
+                    rest = text
+                self.list_preview.item(li).setText(f"{row_idx}: {prefix} {rest.split(' ', 1)[1] if ' ' in rest else rest}")
+        # Auto-advance
+        if not removed:
+            if self.current_idx < len(self.filtered_indices) - 1:
+                self.current_idx += 1
+        # Update stats/summary and view
+        self._update_stats_quick()
+        self.update_summary()
+        self.refresh_view()
+        self._select_current_in_list()
 
     def on_change_label_col(self, name: str) -> None:
         if name:
@@ -722,6 +823,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # Sort columns
         self.cmb_sort_col.blockSignals(True)
         self.cmb_sort_col.clear()
+        self.cmb_sort_col.addItem("(no sort)")
         if self.df is not None:
             for col in list(self.df.columns):
                 self.cmb_sort_col.addItem(col)
@@ -755,7 +857,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
             df = df[(df[self.active_label_col].isna()) | (df[self.active_label_col] == "")]
         # sort
         sort_col = self.cmb_sort_col.currentText()
-        if sort_col and sort_col in df.columns:
+        if sort_col and sort_col != "(no sort)" and sort_col in df.columns:
             df = df.sort_values(by=sort_col, ascending=not self.chk_sort_desc.isChecked(), kind="mergesort")
         # update indices/preview list
         self.filtered_indices = list(df.index)
@@ -800,6 +902,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
             pass
         # Update summary after any filter change
         self.update_summary()
+
+    def on_clear_sort(self) -> None:
+        try:
+            i = self.cmb_sort_col.findText("(no sort)")
+            if i >= 0:
+                self.cmb_sort_col.setCurrentIndex(i)
+            self.chk_sort_desc.setChecked(False)
+        except Exception:
+            pass
+        self.apply_filters()
 
     def update_summary(self) -> None:
         if self.df is None or self.df.empty:
@@ -935,9 +1047,14 @@ class LabelerWindow(QtWidgets.QMainWindow):
         resolved_infer, resolved_orig, disp = self._resolve_img_for_row(row_idx)
         self._set_image_on_label(self.image_label_infer, self.scroll_infer, resolved_infer)
         self._set_image_on_label(self.image_label_orig, self.scroll_orig, resolved_orig)
+        inf_txt = "OK" if resolved_infer else "not found"
+        org_txt = "OK" if resolved_orig else "not found"
         self.lbl_info.setText(
-            f"Row {self.current_idx+1}/{len(self.filtered_indices)}\nINF: {'OK' if resolved_infer else 'not found'} | ORG: {'OK' if resolved_orig else 'not found'}\n{disp}"
+            f"Row {self.current_idx+1}/{len(self.filtered_indices)}  |  INF: {inf_txt}  |  ORG: {org_txt}\n{disp}"
         )
+        # Also show on status bar permanently
+        if hasattr(self, 'lbl_status_io'):
+            self.lbl_status_io.setText(f"INF: {inf_txt}   ORG: {org_txt}")
         # Load memo for current row
         json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
         entry = get_json_entry(json_path, row_idx)
@@ -948,7 +1065,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
         label_val = str(self.df.loc[row_idx].get(self.active_label_col, "")) if (self.df is not None and self.active_label_col in self.df.columns) else ""
         bookmarked = bool(entry.get("bookmark", False))
         if label_val:
-            color = "#2e7d32"  # green
+            if str(label_val).strip().upper() == "NG":
+                color = "#c62828"  # red for NG
+            else:
+                color = "#2e7d32"  # green for OK or others
             text = f"Labeled: {label_val}"
         else:
             color = "#c62828"  # red
@@ -957,7 +1077,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
             text = "★ " + text
         self.lbl_banner.setText(text)
         self.lbl_banner.setStyleSheet(
-            f"background:{color}22; color:{color}; border:1px solid {color}; font-size:20px; font-weight:700; padding:8px; border-radius:8px;"
+            f"background:{color}22; color:{color}; border:2px solid {color}; font-size:24px; font-weight:800; padding:4px; border-radius:4px;"
         )
 
     def _set_image_on_label(self, label: QtWidgets.QLabel, scroll: QtWidgets.QScrollArea, path: Optional[str]) -> None:
