@@ -212,7 +212,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.setCentralWidget(splitter)
 
-        # Left: two image previews (inference/viz | original) side-by-side
+        # Left: two image previews (inference/viz | original) side-by-side with a status banner
         images_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         # Inference/Viz panel
         self.scroll_infer = QtWidgets.QScrollArea()
@@ -355,8 +355,24 @@ class LabelerWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.lbl_info)
         right_layout.addStretch()
 
-        splitter.addWidget(images_split)
-        splitter.addWidget(right)
+        # Left container with banner + images
+        left_container = QtWidgets.QWidget()
+        left_v = QtWidgets.QVBoxLayout(left_container)
+        self.lbl_banner = QtWidgets.QLabel("Status: -")
+        self.lbl_banner.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_banner.setMinimumHeight(40)
+        self.lbl_banner.setStyleSheet(
+            "font-size: 18px; font-weight: 600; padding: 6px; border-radius: 6px;"
+        )
+        left_v.addWidget(self.lbl_banner)
+        left_v.addWidget(images_split)
+
+        # Wrap right panel with scroll area to avoid overflow
+        right_scroll = QtWidgets.QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right)
+        splitter.addWidget(left_container)
+        splitter.addWidget(right_scroll)
         splitter.setSizes([1200, 400])
 
         # Update on viewport resize for responsive fit
@@ -928,6 +944,21 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.edt_memo.blockSignals(True)
         self.edt_memo.setPlainText(str(entry.get("memo", "")))
         self.edt_memo.blockSignals(False)
+        # Update banner style (label state + bookmark)
+        label_val = str(self.df.loc[row_idx].get(self.active_label_col, "")) if (self.df is not None and self.active_label_col in self.df.columns) else ""
+        bookmarked = bool(entry.get("bookmark", False))
+        if label_val:
+            color = "#2e7d32"  # green
+            text = f"Labeled: {label_val}"
+        else:
+            color = "#c62828"  # red
+            text = "Unlabeled"
+        if bookmarked:
+            text = "★ " + text
+        self.lbl_banner.setText(text)
+        self.lbl_banner.setStyleSheet(
+            f"background:{color}22; color:{color}; border:1px solid {color}; font-size:20px; font-weight:700; padding:8px; border-radius:8px;"
+        )
 
     def _set_image_on_label(self, label: QtWidgets.QLabel, scroll: QtWidgets.QScrollArea, path: Optional[str]) -> None:
         if not path or not os.path.exists(path):
