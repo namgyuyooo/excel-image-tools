@@ -171,10 +171,18 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.active_label_col: str = "review_label"
         self.current_idx: int = 0
         self.filtered_indices: List[int] = []
+        self.fit_to_window: bool = True
+        # Persist settings
+        self.settings = QtCore.QSettings("rtm", "pyside_labeler")
 
         # UI
         self._build_ui()
         self._connect_shortcuts()
+        # Try restore last session
+        try:
+            self.restore_last_session()
+        except Exception:
+            pass
 
     def _build_ui(self) -> None:
         self.status = self.statusBar()
@@ -309,6 +317,14 @@ class LabelerWindow(QtWidgets.QMainWindow):
         sum_layout.addWidget(self.txt_summary)
         right_layout.addWidget(grp_sum)
 
+        # Log bar at bottom
+        grp_log = QtWidgets.QGroupBox("Log")
+        log_layout = QtWidgets.QVBoxLayout(grp_log)
+        self.txt_log = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.txt_log.setMinimumHeight(80)
+        log_layout.addWidget(self.txt_log)
+        right_layout.addWidget(grp_log)
+
         # Bookmark + Memo
         grp_bm = QtWidgets.QGroupBox("Bookmark / Memo")
         bm_layout = QtWidgets.QGridLayout(grp_bm)
@@ -422,6 +438,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.apply_filters()
             self.refresh_view()
             self.status.showMessage(f"Loaded: {self.excel_path}")
+            self.log(f"Loaded file: {self.excel_path}")
+            # persist
+            self.settings.setValue("excel_path", path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open failed", str(e))
 
@@ -430,11 +449,32 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if path:
             self.images_base = path
             self.refresh_view()
+            self.log(f"Set Images Base: {path}")
+            self.settings.setValue("images_base", path)
 
     def on_set_images_base_orig(self) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Original Images Base", os.getcwd())
         if path:
             self.images_base_orig = path
+            self.refresh_view()
+            self.log(f"Set Original Images Base: {path}")
+            self.settings.setValue("images_base_orig", path)
+
+    def restore_last_session(self) -> None:
+        excel = self.settings.value("excel_path", "", str)
+        img_base = self.settings.value("images_base", "", str)
+        img_base_orig = self.settings.value("images_base_orig", "", str)
+        if excel and os.path.exists(excel):
+            # Reuse same loading routine
+            try:
+                self.on_open_excel.__func__(self)  # fallback if needed
+            except Exception:
+                self.load_excel_from_path(excel) if hasattr(self, 'load_excel_from_path') else None
+        if img_base and os.path.isdir(img_base):
+            self.images_base = img_base
+        if img_base_orig and os.path.isdir(img_base_orig):
+            self.images_base_orig = img_base_orig
+        if img_base or img_base_orig:
             self.refresh_view()
 
     def on_configure_labels(self) -> None:
@@ -545,6 +585,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
             applied = apply_json_to_excel(self.json_path or default_json_path(out), out, self.sheet_name, col_indices, self.df)
             self.output_excel_path = out
             self.status.showMessage(f"Applied {applied} cells → {out}")
+            self.log(f"Applied JSON to Excel: {applied} cells → {out}")
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export failed", str(e))
 
@@ -584,6 +625,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         store["labels"][key] = entry
         save_label_store(json_path, store)
         self.status.showMessage(f"Saved to JSON: {self.active_label_col}={value}")
+        self.log(f"Label saved: row {row_idx} {self.active_label_col}={value}")
         # Auto next
         self.on_next()
 
@@ -608,6 +650,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         store["labels"][key] = entry
         save_label_store(json_path, store)
         self.status.showMessage(f"Saved to JSON: {self.active_label_col}={text}")
+        self.log(f"Label saved: row {row_idx} {self.active_label_col}={text}")
         self.on_next()
 
     def on_change_label_col(self, name: str) -> None:
@@ -710,13 +753,24 @@ class LabelerWindow(QtWidgets.QMainWindow):
             prefix = "✅" if label_val else "⏳"
             self.list_preview.addItem(f"{idx}: {prefix} {disp}")
         self.list_preview.blockSignals(False)
-        # live stats
+        # live stats (filtered + overall)
         total = len(self.df) if self.df is not None else 0
-        unlabeled = 0
+        overall_unlabeled = 0
+        overall_labeled = 0
         if self.df is not None and self.active_label_col in self.df.columns:
-            unlabeled = int(((self.df[self.active_label_col].isna()) | (self.df[self.active_label_col] == "")).sum())
-        labeled = total - unlabeled
-        self.lbl_stats.setText(f"Filtered: {len(self.filtered_indices)} / Total: {total} | Labeled: {labeled} | Unlabeled: {unlabeled}")
+            overall_unlabeled = int(((self.df[self.active_label_col].isna()) | (self.df[self.active_label_col] == "")).sum())
+            overall_labeled = total - overall_unlabeled
+        # filtered counts
+        f_total = len(self.filtered_indices)
+        f_labeled = 0
+        f_unlabeled = 0
+        if f_total > 0 and self.active_label_col in self.df.columns:
+            sub = self.df.loc[self.filtered_indices, self.active_label_col]
+            f_unlabeled = int(((sub.isna()) | (sub == "")).sum())
+            f_labeled = f_total - f_unlabeled
+        self.lbl_stats.setText(
+            f"Filtered: {f_total} | Labeled: {f_labeled} | Unlabeled: {f_unlabeled}  ||  Overall: {total} (L:{overall_labeled} U:{overall_unlabeled})"
+        )
         self.refresh_view()
         # Ensure current row is selected in the list for visibility
         try:
@@ -773,6 +827,14 @@ class LabelerWindow(QtWidgets.QMainWindow):
         ]
         self.txt_summary.setPlainText("\n".join(lines))
 
+    def log(self, message: str) -> None:
+        try:
+            ts = datetime.now().strftime("%H:%M:%S")
+            if hasattr(self, 'txt_log') and self.txt_log is not None:
+                self.txt_log.appendPlainText(f"[{ts}] {message}")
+        except Exception:
+            pass
+
     def reset_filters(self) -> None:
         if self.df is None:
             return
@@ -809,6 +871,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         curr = bool(entry.get("bookmark", False))
         upsert_json_entry(json_path, row_idx, {"bookmark": not curr})
         self.status.showMessage("Bookmark " + ("ON" if not curr else "OFF"))
+        self.log(f"Bookmark {'ON' if not curr else 'OFF'} for row {row_idx}")
 
     def on_save_memo(self) -> None:
         if self.df is None or not self.filtered_indices:
@@ -818,6 +881,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
         upsert_json_entry(json_path, row_idx, {"memo": memo})
         self.status.showMessage("Memo saved")
+        self.log(f"Memo saved for row {row_idx} ({len(memo)} chars)")
 
     def _resolve_img_for_row(self, row_idx: int) -> Tuple[Optional[str], Optional[str], str]:
         if self.df is None or self.images_base == "":
