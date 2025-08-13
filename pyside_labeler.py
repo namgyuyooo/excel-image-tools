@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import hashlib
+import re
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -16,6 +17,32 @@ from openpyxl import load_workbook
 # Reuse path resolution from the existing module
 from create_excel_from_seg_csv import resolve_image_path, normalize_relative_path
 import glob
+
+
+def parse_pred_list(value) -> List[str]:
+    """Parse pred_seg_results value into a list of strings.
+    Handles JSON arrays, python-like list strings, or comma-separated strings.
+    """
+    try:
+        if isinstance(value, (list, tuple, set)):
+            return [str(x).strip() for x in value]
+        s = str(value).strip()
+        if not s:
+            return []
+        # Try JSON first
+        if s.startswith("[") or s.startswith("{"):
+            try:
+                data = json.loads(s)
+                if isinstance(data, (list, tuple, set)):
+                    return [str(x).strip() for x in data]
+            except Exception:
+                pass
+        # Fallback: strip brackets and split by semicolon/comma variants
+        s2 = s.strip().strip('[](){}')
+        parts = [p.strip().strip("'\"") for p in re.split(r"[;,\uFF1B\uFF0C]+", s2) if p.strip()]
+        return parts
+    except Exception:
+        return []
 
 
 def ensure_object_dtype(df: pd.DataFrame, column: str) -> None:
@@ -161,13 +188,14 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # State
         self.images_base: str = ""  # inference/viz base
         self.images_base_orig: str = ""  # original images base with same sub-structure
+        self.images_base_extra: str = ""  # optional extra images base
         self.excel_path: str = ""
         self.output_excel_path: str = ""
         self.json_path: str = ""
         self.df: Optional[pd.DataFrame] = None
         self.sheet_name: str = "inference_results"
         self.col_indices: Dict[str, int] = {}
-        self.label_map: Dict[str, List[str]] = {"review_label": ["OK", "NG", "보류"]}
+        self.label_map: Dict[str, List[str]] = {"review_label": ["OK", "NG", "NG_BUT", "보류"]}
         self.active_label_col: str = "review_label"
         self.current_idx: int = 0
         self.filtered_indices: List[int] = []
@@ -197,12 +225,14 @@ class LabelerWindow(QtWidgets.QMainWindow):
         act_set_images = file_menu.addAction("Set Images Base…")
         act_export = file_menu.addAction("Apply JSON → Excel…")
         act_set_images_orig = file_menu.addAction("Set Original Images Base…")
+        act_set_images_extra = file_menu.addAction("Set Extra Images Base…")
         act_quit = file_menu.addAction("Quit")
         act_quit.triggered.connect(self.close)
         act_open.triggered.connect(self.on_open_excel)
         act_set_images.triggered.connect(self.on_set_images_base)
         act_export.triggered.connect(self.on_apply_json)
         act_set_images_orig.triggered.connect(self.on_set_images_base_orig)
+        act_set_images_extra.triggered.connect(self.on_set_images_base_extra)
 
         config_menu = self.menuBar().addMenu("Config")
         act_labels = config_menu.addAction("Configure Labels…")
@@ -216,7 +246,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         self.setCentralWidget(splitter)
 
-        # Left: two image previews (inference/viz | original) side-by-side with a status banner
+        # Left: three image previews (inference/viz | original | extra) side-by-side with a status banner
         images_split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
         # Inference/Viz panel
         self.scroll_infer = QtWidgets.QScrollArea()
@@ -232,9 +262,17 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.image_label_orig.setScaledContents(False)
         self.image_label_orig.setBackgroundRole(QtGui.QPalette.Base)
         self.scroll_orig.setWidget(self.image_label_orig)
+        # Extra panel (optional)
+        self.scroll_extra = QtWidgets.QScrollArea()
+        self.scroll_extra.setWidgetResizable(True)
+        self.image_label_extra = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+        self.image_label_extra.setScaledContents(False)
+        self.image_label_extra.setBackgroundRole(QtGui.QPalette.Base)
+        self.scroll_extra.setWidget(self.image_label_extra)
         # Assemble side-by-side
         images_split.addWidget(self.scroll_infer)
         images_split.addWidget(self.scroll_orig)
+        images_split.addWidget(self.scroll_extra)
         images_split.splitterMoved.connect(lambda *_: self.refresh_view())
 
         # Right: controls
@@ -282,6 +320,17 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.chk_sort_desc = QtWidgets.QCheckBox("Desc")
         self.btn_clear_sort = QtWidgets.QPushButton("Clear sort")
         self.btn_clear_sort.clicked.connect(self.on_clear_sort)
+        self.chk_bookmarks = QtWidgets.QCheckBox("Only bookmarks")
+        # pred_seg_results filters
+        self.grp_pred = QtWidgets.QGroupBox("pred_seg_results contains")
+        gl_pred = QtWidgets.QGridLayout(self.grp_pred)
+        self.chk_pred_exclusive = QtWidgets.QCheckBox("Exclusive (only selected)")
+        self.chk_pred_exclude = QtWidgets.QCheckBox("Exclude selected")
+        self.pred_checks_container = QtWidgets.QWidget()
+        self.pred_checks_layout = QtWidgets.QGridLayout(self.pred_checks_container)
+        gl_pred.addWidget(self.chk_pred_exclusive, 0, 0)
+        gl_pred.addWidget(self.chk_pred_exclude, 0, 1)
+        gl_pred.addWidget(self.pred_checks_container, 1, 0, 1, 2)
         self.btn_apply_filter = QtWidgets.QPushButton("Apply")
         self.btn_reset_filter = QtWidgets.QPushButton("Reset")
         self.btn_apply_filter.clicked.connect(self.apply_filters)
@@ -293,18 +342,27 @@ class LabelerWindow(QtWidgets.QMainWindow):
         fl.addWidget(QtWidgets.QLabel("Label state"), 2, 0)
         fl.addWidget(self.cmb_label_state, 2, 1)
         fl.addWidget(self.chk_unlabeled, 3, 0, 1, 2)
+        fl.addWidget(self.chk_bookmarks, 3, 2)
         fl.addWidget(QtWidgets.QLabel("Sort by"), 4, 0)
         fl.addWidget(self.cmb_sort_col, 4, 1)
         fl.addWidget(self.chk_sort_desc, 4, 2)
         fl.addWidget(self.btn_clear_sort, 4, 3)
-        fl.addWidget(self.btn_apply_filter, 5, 1)
-        fl.addWidget(self.btn_reset_filter, 5, 2)
+        # pred filters row
+        fl.addWidget(self.grp_pred, 5, 0, 1, 4)
+        fl.addWidget(self.btn_apply_filter, 6, 1)
+        fl.addWidget(self.btn_reset_filter, 6, 2)
         right_layout.addWidget(grp_filter)
 
-        # Quick list of filtered items
-        self.list_preview = QtWidgets.QListWidget()
-        self.list_preview.itemSelectionChanged.connect(self.on_list_select)
-        right_layout.addWidget(self.list_preview)
+        # Preview table of filtered items (sortable columns)
+        self.table_preview = QtWidgets.QTableWidget()
+        self.table_preview.setColumnCount(4)
+        self.table_preview.setHorizontalHeaderLabels(["idx", "label", "path", "value"]) 
+        self.table_preview.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table_preview.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table_preview.setSortingEnabled(True)
+        self.table_preview.itemSelectionChanged.connect(self.on_table_select)
+        self.table_preview.horizontalHeader().setStretchLastSection(True)
+        right_layout.addWidget(self.table_preview)
 
         # View options
         self.chk_fit = QtWidgets.QCheckBox("Fit to window")
@@ -386,6 +444,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # Update on viewport resize for responsive fit
         self.scroll_infer.viewport().installEventFilter(self)
         self.scroll_orig.viewport().installEventFilter(self)
+        self.scroll_extra.viewport().installEventFilter(self)
 
     def _connect_shortcuts(self) -> None:
         QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left), self, activated=self.on_prev)
@@ -484,10 +543,19 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.log(f"Set Original Images Base: {path}")
             self.settings.setValue("images_base_orig", path)
 
+    def on_set_images_base_extra(self) -> None:
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Extra Images Base", os.getcwd())
+        if path:
+            self.images_base_extra = path
+            self.refresh_view()
+            self.log(f"Set Extra Images Base: {path}")
+            self.settings.setValue("images_base_extra", path)
+
     def restore_last_session(self) -> None:
         excel = self.settings.value("excel_path", "", str)
         img_base = self.settings.value("images_base", "", str)
         img_base_orig = self.settings.value("images_base_orig", "", str)
+        img_base_extra = self.settings.value("images_base_extra", "", str)
         if excel and os.path.exists(excel):
             # Reuse same loading routine
             try:
@@ -499,6 +567,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if img_base_orig and os.path.isdir(img_base_orig):
             self.images_base_orig = img_base_orig
         if img_base or img_base_orig:
+            self.refresh_view()
+        if img_base_extra and os.path.isdir(img_base_extra):
+            self.images_base_extra = img_base_extra
             self.refresh_view()
 
     def on_configure_labels(self) -> None:
@@ -690,8 +761,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
 
     def _find_list_row_by_index(self, idx: int) -> int:
         try:
-            for i in range(self.list_preview.count()):
-                if self.list_preview.item(i).text().startswith(f"{idx}:"):
+            # lookup first column in table
+            for i in range(self.table_preview.rowCount()):
+                it = self.table_preview.item(i, 0)
+                if it and it.text() == str(idx):
                     return i
         except Exception:
             pass
@@ -699,11 +772,11 @@ class LabelerWindow(QtWidgets.QMainWindow):
 
     def _select_current_in_list(self) -> None:
         try:
-            if self.filtered_indices:
-                sel_idx = self.filtered_indices[self.current_idx]
-                i = self._find_list_row_by_index(sel_idx)
-                if i >= 0:
-                    self.list_preview.setCurrentRow(i)
+            if self.filtered_indices and 0 <= self.current_idx < len(self.filtered_indices):
+                self.table_preview.blockSignals(True)
+                self.table_preview.clearSelection()
+                self.table_preview.selectRow(self.current_idx)
+                self.table_preview.blockSignals(False)
         except Exception:
             pass
 
@@ -743,7 +816,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     pos = self.filtered_indices.index(row_idx)
                     self.filtered_indices.pop(pos)
                     if 0 <= li:
-                        self.list_preview.takeItem(li)
+                        self.table_preview.removeRow(li)
                     # keep current_idx pointing to next item
                     if self.current_idx >= len(self.filtered_indices):
                         self.current_idx = max(0, len(self.filtered_indices) - 1)
@@ -752,14 +825,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     pass
         else:
             if 0 <= li:
-                text = self.list_preview.item(li).text()
-                prefix = "✅" if label_val else "⏳"
-                try:
-                    # replace after "idx: " prefix
-                    rest = text.split(":", 1)[1].strip()
-                except Exception:
-                    rest = text
-                self.list_preview.item(li).setText(f"{row_idx}: {prefix} {rest.split(' ', 1)[1] if ' ' in rest else rest}")
+                # update label flag and value
+                self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
+                self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
         # Auto-advance
         if not removed:
             if self.current_idx < len(self.filtered_indices) - 1:
@@ -828,6 +896,27 @@ class LabelerWindow(QtWidgets.QMainWindow):
             for col in list(self.df.columns):
                 self.cmb_sort_col.addItem(col)
         self.cmb_sort_col.blockSignals(False)
+        # pred_seg_results unique values → checkboxes
+        while self.pred_checks_layout.count():
+            it = self.pred_checks_layout.takeAt(0)
+            w = it.widget()
+            if w:
+                w.setParent(None)
+        if self.df is not None and "pred_seg_results" in self.df.columns:
+            try:
+                uniques: List[str] = []
+                for v in self.df["pred_seg_results"].fillna(""):
+                    for item in parse_pred_list(v):
+                        if item and item not in uniques:
+                            uniques.append(item)
+                uniques = sorted(uniques)
+                self.pred_checkboxes: Dict[str, QtWidgets.QCheckBox] = {}
+                for i, val in enumerate(uniques):
+                    cb = QtWidgets.QCheckBox(val)
+                    self.pred_checkboxes[val] = cb
+                    self.pred_checks_layout.addWidget(cb, i // 3, i % 3)
+            except Exception:
+                pass
 
     def apply_filters(self) -> None:
         if self.df is None:
@@ -846,6 +935,23 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 if col in df.columns:
                     mask = mask | df[col].astype(str).str.lower().str.contains(t_low, na=False)
             df = df[mask]
+        # bookmark-only filter (JSON-backed)
+        if hasattr(self, 'chk_bookmarks') and self.chk_bookmarks.isChecked():
+            try:
+                json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
+                store = load_label_store(json_path)
+                labels = store.get("labels", {})
+                bookmarked_ids = set()
+                for k, entry in labels.items():
+                    try:
+                        ridx = int(k)
+                    except Exception:
+                        continue
+                    if bool(entry.get("bookmark", False)) and ridx in df.index:
+                        bookmarked_ids.add(ridx)
+                df = df[df.index.isin(bookmarked_ids)]
+            except Exception:
+                pass
         # label state filter
         state = self.cmb_label_state.currentText()
         if state == "Unlabeled" and self.active_label_col in df.columns:
@@ -855,6 +961,33 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # legacy checkbox support
         if self.chk_unlabeled.isChecked() and self.active_label_col in df.columns:
             df = df[(df[self.active_label_col].isna()) | (df[self.active_label_col] == "")]
+        # pred_seg_results filter logic
+        try:
+            selected: List[str] = []
+            if hasattr(self, 'pred_checkboxes'):
+                for k, cb in self.pred_checkboxes.items():
+                    if cb.isChecked():
+                        selected.append(k)
+            if selected:
+                exclusive = self.chk_pred_exclusive.isChecked() if hasattr(self, 'chk_pred_exclusive') else False
+                exclude = self.chk_pred_exclude.isChecked() if hasattr(self, 'chk_pred_exclude') else False
+                keep_mask = []
+                for ridx, v in df['pred_seg_results'].fillna("").items() if 'pred_seg_results' in df.columns else []:
+                    items = set(parse_pred_list(v))
+                    if exclude:
+                        # drop rows that contain any selected items
+                        keep = len(items.intersection(selected)) == 0
+                    elif exclusive:
+                        # keep only rows whose set equals selected
+                        keep = items and items.issubset(set(selected)) and set(selected).issubset(items)
+                    else:
+                        # keep rows that contain at least one selected item
+                        keep = len(items.intersection(selected)) > 0
+                    keep_mask.append(keep)
+                if 'pred_seg_results' in df.columns:
+                    df = df[pd.Series(keep_mask, index=df.index)]
+        except Exception:
+            pass
         # sort
         sort_col = self.cmb_sort_col.currentText()
         if sort_col and sort_col != "(no sort)" and sort_col in df.columns:
@@ -862,15 +995,24 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # update indices/preview list
         self.filtered_indices = list(df.index)
         self.current_idx = 0 if self.filtered_indices else 0
-        self.list_preview.blockSignals(True)
-        self.list_preview.clear()
-        for idx in self.filtered_indices[:1000]:  # cap preview
+        # Populate preview table (no artificial cap)
+        self.table_preview.blockSignals(True)
+        self.table_preview.clearContents()
+        self.table_preview.setRowCount(len(self.filtered_indices))
+        for r, idx in enumerate(self.filtered_indices):
             row = self.df.loc[idx]
             disp = str(row.get("img_path", row.get("filename", idx)))
             label_val = str(row.get(self.active_label_col, "")) if self.active_label_col in self.df.columns else ""
-            prefix = "✅" if label_val else "⏳"
-            self.list_preview.addItem(f"{idx}: {prefix} {disp}")
-        self.list_preview.blockSignals(False)
+            label_flag = "1" if label_val else "0"  # for sorting
+            self.table_preview.setItem(r, 0, QtWidgets.QTableWidgetItem(str(idx)))
+            self.table_preview.setItem(r, 1, QtWidgets.QTableWidgetItem(label_flag))
+            self.table_preview.setItem(r, 2, QtWidgets.QTableWidgetItem(disp))
+            self.table_preview.setItem(r, 3, QtWidgets.QTableWidgetItem(label_val))
+        self.table_preview.blockSignals(False)
+        # default-select the top-most row
+        if self.filtered_indices and self.table_preview.rowCount() > 0:
+            self.current_idx = 0
+            self.table_preview.selectRow(0)
         # live stats (filtered + overall)
         total = len(self.df) if self.df is not None else 0
         overall_unlabeled = 0
@@ -891,13 +1033,13 @@ class LabelerWindow(QtWidgets.QMainWindow):
         )
         self.refresh_view()
         # Ensure current row is selected in the list for visibility
+        # ensure selected row in table remains in sync
         try:
-            if self.filtered_indices:
-                sel_idx = self.filtered_indices[self.current_idx]
-                for i in range(self.list_preview.count()):
-                    if self.list_preview.item(i).text().startswith(f"{sel_idx}:"):
-                        self.list_preview.setCurrentRow(i)
-                        break
+            if self.filtered_indices and 0 <= self.current_idx < len(self.filtered_indices):
+                self.table_preview.blockSignals(True)
+                self.table_preview.clearSelection()
+                self.table_preview.selectRow(self.current_idx)
+                self.table_preview.blockSignals(False)
         except Exception:
             pass
         # Update summary after any filter change
@@ -971,23 +1113,23 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.cmb_origin.setCurrentIndex(0)
         self.cmb_sort_col.setCurrentIndex(0 if self.cmb_sort_col.count() > 0 else -1)
         self.chk_sort_desc.setChecked(False)
-        self.filtered_indices = list(self.df.index)
-        self.current_idx = 0
-        self.list_preview.clear()
-        self.refresh_view()
-
-    def on_list_select(self) -> None:
-        items = self.list_preview.selectedItems()
-        if not items:
-            return
-        # parse index prefix
-        text = items[0].text()
+        # default to Unlabeled for active label column
         try:
-            idx = int(text.split(":", 1)[0])
+            i = self.cmb_label_state.findText("Unlabeled")
+            if i >= 0:
+                self.cmb_label_state.setCurrentIndex(i)
         except Exception:
+            pass
+        # re-apply to rebuild list and select top
+        self.apply_filters()
+
+    def on_table_select(self) -> None:
+        rows = self.table_preview.selectionModel().selectedRows()
+        if not rows:
             return
-        if idx in self.filtered_indices:
-            self.current_idx = self.filtered_indices.index(idx)
+        row = rows[0].row()
+        if 0 <= row < len(self.filtered_indices):
+            self.current_idx = row
             self.refresh_view()
 
     def on_toggle_bookmark(self) -> None:
@@ -1011,9 +1153,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.status.showMessage("Memo saved")
         self.log(f"Memo saved for row {row_idx} ({len(memo)} chars)")
 
-    def _resolve_img_for_row(self, row_idx: int) -> Tuple[Optional[str], Optional[str], str]:
+    def _resolve_img_for_row(self, row_idx: int) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
         if self.df is None or self.images_base == "":
-            return None, None, ""
+            return None, None, None, ""
         r = self.df.loc[row_idx]
         p = str(r.get("img_path", "")) or str(r.get("filename", ""))
         resolved_infer = resolve_image_path(self.images_base, p)
@@ -1035,7 +1177,25 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     if m:
                         resolved_orig = m[0]
                         break
-        return resolved_infer, resolved_orig, p
+        # Resolve extra similarly
+        resolved_extra = None
+        if self.images_base_extra:
+            rel = normalize_relative_path(p)
+            cand = os.path.join(self.images_base_extra, rel)
+            if os.path.exists(cand):
+                resolved_extra = cand
+            else:
+                base = os.path.basename(rel)
+                base_no_ext, _ = os.path.splitext(base)
+                for pattern in [
+                    os.path.join(self.images_base_extra, "**", base),
+                    os.path.join(self.images_base_extra, "**", f"{base_no_ext}.*"),
+                ]:
+                    m = glob.glob(pattern, recursive=True)
+                    if m:
+                        resolved_extra = m[0]
+                        break
+        return resolved_infer, resolved_orig, resolved_extra, p
 
     def refresh_view(self) -> None:
         if self.df is None or not self.filtered_indices:
@@ -1044,17 +1204,19 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.lbl_info.setText("Open Excel/CSV and set Images Bases.")
             return
         row_idx = self.filtered_indices[self.current_idx]
-        resolved_infer, resolved_orig, disp = self._resolve_img_for_row(row_idx)
+        resolved_infer, resolved_orig, resolved_extra, disp = self._resolve_img_for_row(row_idx)
         self._set_image_on_label(self.image_label_infer, self.scroll_infer, resolved_infer)
         self._set_image_on_label(self.image_label_orig, self.scroll_orig, resolved_orig)
+        self._set_image_on_label(self.image_label_extra, self.scroll_extra, resolved_extra)
         inf_txt = "OK" if resolved_infer else "not found"
         org_txt = "OK" if resolved_orig else "not found"
+        ext_txt = "OK" if resolved_extra else "not set"
         self.lbl_info.setText(
-            f"Row {self.current_idx+1}/{len(self.filtered_indices)}  |  INF: {inf_txt}  |  ORG: {org_txt}\n{disp}"
+            f"Row {self.current_idx+1}/{len(self.filtered_indices)}  |  INF: {inf_txt}  |  ORG: {org_txt}  |  EXT: {ext_txt}\n{disp}"
         )
         # Also show on status bar permanently
         if hasattr(self, 'lbl_status_io'):
-            self.lbl_status_io.setText(f"INF: {inf_txt}   ORG: {org_txt}")
+            self.lbl_status_io.setText(f"INF: {inf_txt}   ORG: {org_txt}   EXT: {ext_txt}")
         # Load memo for current row
         json_path = self.json_path or default_json_path(self.output_excel_path or self.excel_path)
         entry = get_json_entry(json_path, row_idx)
@@ -1065,7 +1227,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         label_val = str(self.df.loc[row_idx].get(self.active_label_col, "")) if (self.df is not None and self.active_label_col in self.df.columns) else ""
         bookmarked = bool(entry.get("bookmark", False))
         if label_val:
-            if str(label_val).strip().upper() == "NG":
+            lv = str(label_val).strip().upper()
+            if lv.startswith("NG"):
                 color = "#c62828"  # red for NG
             else:
                 color = "#2e7d32"  # green for OK or others
