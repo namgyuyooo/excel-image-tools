@@ -214,6 +214,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.fit_to_window: bool = True
         # Persist settings
         self.settings = QtCore.QSettings("rtm", "pyside_labeler")
+        # Internal navigation guard
+        self._navigating: bool = False
         # Batched JSON save
         self._pending_ops: List[Tuple[str, int, Dict[str, object], Dict[str, str]]] = []
         self._pending_json_path: str = ""
@@ -335,6 +337,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.chk_unlabeled = QtWidgets.QCheckBox("Only unlabeled (active col)")
         self.cmb_label_state = QtWidgets.QComboBox()
         self.cmb_label_state.addItems(["All", "Labeled", "Unlabeled"])  # stronger label filter
+        # Value filter (specific option in active label column)
+        self.cmb_label_value = QtWidgets.QComboBox()
         self.cmb_sort_col = QtWidgets.QComboBox()
         self.chk_sort_desc = QtWidgets.QCheckBox("Desc")
         self.btn_clear_sort = QtWidgets.QPushButton("Clear sort")
@@ -360,16 +364,18 @@ class LabelerWindow(QtWidgets.QMainWindow):
         fl.addWidget(self.edt_text, 1, 1)
         fl.addWidget(QtWidgets.QLabel("Label state"), 2, 0)
         fl.addWidget(self.cmb_label_state, 2, 1)
-        fl.addWidget(self.chk_unlabeled, 3, 0, 1, 2)
-        fl.addWidget(self.chk_bookmarks, 3, 2)
-        fl.addWidget(QtWidgets.QLabel("Sort by"), 4, 0)
-        fl.addWidget(self.cmb_sort_col, 4, 1)
-        fl.addWidget(self.chk_sort_desc, 4, 2)
-        fl.addWidget(self.btn_clear_sort, 4, 3)
+        fl.addWidget(QtWidgets.QLabel("Value (active col)"), 3, 0)
+        fl.addWidget(self.cmb_label_value, 3, 1)
+        fl.addWidget(self.chk_unlabeled, 4, 0, 1, 2)
+        fl.addWidget(self.chk_bookmarks, 4, 2)
+        fl.addWidget(QtWidgets.QLabel("Sort by"), 5, 0)
+        fl.addWidget(self.cmb_sort_col, 5, 1)
+        fl.addWidget(self.chk_sort_desc, 5, 2)
+        fl.addWidget(self.btn_clear_sort, 5, 3)
         # pred filters row
-        fl.addWidget(self.grp_pred, 5, 0, 1, 4)
-        fl.addWidget(self.btn_apply_filter, 6, 1)
-        fl.addWidget(self.btn_reset_filter, 6, 2)
+        fl.addWidget(self.grp_pred, 6, 0, 1, 4)
+        fl.addWidget(self.btn_apply_filter, 7, 1)
+        fl.addWidget(self.btn_reset_filter, 7, 2)
         right_layout.addWidget(grp_filter)
 
         # Preview table of filtered items (sortable columns)
@@ -707,12 +713,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
 
     # Navigation / labeling
     def on_prev(self) -> None:
+        if self._navigating:
+            return
         if not self.filtered_indices:
             return
         self.current_idx = max(0, self.current_idx - 1)
         self.refresh_view()
 
     def on_next(self) -> None:
+        if self._navigating:
+            return
         if not self.filtered_indices:
             return
         self.current_idx = min(len(self.filtered_indices) - 1, self.current_idx + 1)
@@ -809,6 +819,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         unlabeled_only = (state == "Unlabeled") or self.chk_unlabeled.isChecked()
         label_val = str(self.df.loc[row_idx].get(self.active_label_col, "")) if (self.df is not None and self.active_label_col in self.df.columns) else ""
         removed = False
+        self._navigating = True
         # Update list item text/icon
         li = self._find_list_row_by_index(row_idx)
         if unlabeled_only and label_val:
@@ -830,30 +841,26 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 # update label flag and value
                 self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
                 self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
-        # if user sorted by label/value, keep the sort live
-        try:
-            header = self.table_preview.horizontalHeader()
-            col = header.sortIndicatorSection()
-            order = header.sortIndicatorOrder()
-            if col is not None and col >= 0 and self.table_preview.rowCount() > 0:
-                self.table_preview.sortByColumn(col, order)
-        except Exception:
-            pass
-        # Auto-advance
+        # Force auto-advance to the immediate next row within current filtered order
         if not removed:
             if self.current_idx < len(self.filtered_indices) - 1:
                 self.current_idx += 1
+        # Clamp if at end
+        if self.current_idx >= len(self.filtered_indices):
+            self.current_idx = max(0, len(self.filtered_indices) - 1)
         # Update stats/summary and view
         self._update_stats_quick()
         self.update_summary()
         self.refresh_view()
         self._select_current_in_list()
+        self._navigating = False
 
     def on_change_label_col(self, name: str) -> None:
         if name:
             self.active_label_col = name
             self.refresh_label_controls()
             self.populate_filter_controls()
+            self._populate_value_filter()
 
     def refresh_label_controls(self) -> None:
         # Reset combobox
@@ -883,6 +890,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.cmb_choice.addItem(opt)
         self.cmb_choice.setCurrentIndex(0)
         self.cmb_choice.blockSignals(False)
+        # value filter options depend on active label column
+        self._populate_value_filter()
 
     def populate_filter_controls(self) -> None:
         # origin_class dropdown
@@ -929,6 +938,30 @@ class LabelerWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
+    def _populate_value_filter(self) -> None:
+        try:
+            self.cmb_label_value.blockSignals(True)
+            self.cmb_label_value.clear()
+            self.cmb_label_value.addItem("(all)")
+            if self.df is not None and self.active_label_col in self.df.columns:
+                vals = (
+                    pd.Series(self.df[self.active_label_col].astype(str))
+                    .replace("nan", "")
+                    .replace("None", "")
+                    .dropna()
+                    .unique()
+                    .tolist()
+                )
+                vals = sorted({v for v in vals if v})
+                for v in vals:
+                    self.cmb_label_value.addItem(str(v))
+            self.cmb_label_value.blockSignals(False)
+        except Exception:
+            try:
+                self.cmb_label_value.blockSignals(False)
+            except Exception:
+                pass
+
     def apply_filters(self) -> None:
         if self.df is None:
             return
@@ -946,6 +979,10 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 if col in df.columns:
                     mask = mask | df[col].astype(str).str.lower().str.contains(t_low, na=False)
             df = df[mask]
+        # value filter for active label column
+        val_sel = self.cmb_label_value.currentText() if hasattr(self, 'cmb_label_value') else "(all)"
+        if val_sel and val_sel != "(all)" and self.active_label_col in df.columns:
+            df = df[df[self.active_label_col].astype(str) == val_sel]
         # bookmark-only filter (JSON-backed)
         if hasattr(self, 'chk_bookmarks') and self.chk_bookmarks.isChecked():
             try:
@@ -1174,6 +1211,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.edt_text.clear()
         self.chk_unlabeled.setChecked(False)
         self.cmb_origin.setCurrentIndex(0)
+        if hasattr(self, 'cmb_label_value'):
+            self.cmb_label_value.setCurrentIndex(0)
         self.cmb_sort_col.setCurrentIndex(0 if self.cmb_sort_col.count() > 0 else -1)
         self.chk_sort_desc.setChecked(False)
         # default to Unlabeled for active label column
