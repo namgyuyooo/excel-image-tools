@@ -14,6 +14,9 @@ except Exception:
     from datetime import timezone as _tz
     _UTC = _tz.utc
 from typing import Dict, List, Optional, Tuple
+import argparse
+import gc
+import psutil
 
 import pandas as pd
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -23,6 +26,31 @@ from openpyxl import load_workbook
 # Reuse path resolution from the existing module
 from create_excel_from_seg_csv import resolve_image_path, normalize_relative_path
 import glob
+
+
+# Memory management utilities
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
+    except:
+        return 0
+
+def check_memory_limit(limit_mb=1024):  # Reduced from 2048 to 1024
+    """Check if memory usage exceeds limit"""
+    return get_memory_usage() > limit_mb
+
+def force_garbage_collection():
+    """Force garbage collection to free memory"""
+    gc.collect()
+
+def get_system_memory():
+    """Get total system memory in MB"""
+    try:
+        return psutil.virtual_memory().total / 1024 / 1024
+    except:
+        return 8192  # Default to 8GB if can't detect
 
 
 def parse_pred_list(value) -> List[str]:
@@ -62,7 +90,18 @@ def default_json_path(xlsx_path: str) -> str:
     base = os.path.basename(xlsx_path)
     root, _ = os.path.splitext(base)
     parent = os.path.dirname(xlsx_path) or os.getcwd()
-    return os.path.join(parent, f"{root}_labels.json")
+    # Preferred naming: if Excel is *_labeled.xlsx → JSON is *_labels.json
+    if root.endswith("_labeled"):
+        new_root = root[: -len("_labeled")] + "_labels"
+    else:
+        new_root = root + "_labels"
+    new_path = os.path.join(parent, f"{new_root}.json")
+    # Legacy path compatibility: previously always appended _labels
+    legacy_path = os.path.join(parent, f"{root}_labels.json")
+    # If legacy exists and new doesn't, keep using legacy for seamless migration
+    if os.path.exists(legacy_path) and not os.path.exists(new_path):
+        return legacy_path
+    return new_path
 
 
 def load_label_store(json_path: str) -> dict:
@@ -138,7 +177,11 @@ def upsert_json_entry(json_path: str, row_idx: int, updater: Dict[str, object]) 
 
 
 def merge_json_into_df(json_path: str, df: pd.DataFrame, label_columns: List[str]) -> None:
-    """Load existing JSON labels and reflect into DataFrame so work can resume after restart."""
+    """Load existing JSON labels and reflect into DataFrame so work can resume after restart.
+
+    - Fills only empty cells to avoid overwriting values already present in Excel/DF
+    - Supports legacy column alias mapping: review_label -> review_label_inf
+    """
     store = load_label_store(json_path)
     labels = store.get("labels", {})
     for key, entry in labels.items():
@@ -150,9 +193,24 @@ def merge_json_into_df(json_path: str, df: pd.DataFrame, label_columns: List[str
             continue
         values = entry.get("values", {})
         for col, val in values.items():
-            if col in label_columns:
+            target_col = col
+            if target_col not in label_columns and col == "review_label" and "review_label_inf" in label_columns:
+                target_col = "review_label_inf"
+            if target_col in label_columns:
                 try:
-                    df.at[ridx, col] = val
+                    curr = None
+                    try:
+                        curr = df.at[ridx, target_col]
+                    except Exception:
+                        curr = None
+                    is_empty = (curr is None) or (str(curr) == "")
+                    try:
+                        if not is_empty:
+                            is_empty = bool(pd.isna(curr))  # type: ignore
+                    except Exception:
+                        pass
+                    if is_empty:
+                        df.at[ridx, target_col] = val
                 except Exception:
                     pass
 
@@ -207,11 +265,36 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.df: Optional[pd.DataFrame] = None
         self.sheet_name: str = "inference_results"
         self.col_indices: Dict[str, int] = {}
-        self.label_map: Dict[str, List[str]] = {"review_label": ["OK", "NG", "NG_BUT", "보류"]}
-        self.active_label_col: str = "review_label"
+        
+        # Memory management and performance settings
+        system_memory = get_system_memory()
+        # Adaptive memory limits based on system memory
+        self.max_memory_mb = min(1024, system_memory * 0.25)  # 25% of system memory, max 1GB
+        self.chunk_size = 500  # Reduced from 1000 for smaller chunks
+        self.max_table_rows = 2000  # Reduced from 5000 for better performance
+        self.image_cache_size = 5  # Reduced from 10 for less memory usage
+        self._image_cache: Dict[str, QtGui.QPixmap] = {}
+        self._lazy_loading = True  # Enable lazy loading for large datasets
+        
+        # Default labeling columns split by mode (INF/EXT)
+        self.label_map: Dict[str, List[str]] = {
+            "review_label_inf": [
+                "OK",
+                "NG",
+                "NG_BUT",
+                "보류",
+                # Custom relabel choices requested
+                "SR-이물->OK",
+                "SR-이물->도금-찍힘",
+            ],
+            "review_label_ext": ["OK_V3","OK_V4", "NG", "NG_BUT", "보류","매칭","매칭_안됨"],
+        }
+        self.active_label_col: str = "review_label_inf"
         self.current_idx: int = 0
         self.filtered_indices: List[int] = []
         self.fit_to_window: bool = True
+        # Dynamic TO-BE choices extracted from CSV predictions
+        self.tobe_choices: List[str] = []
         # Persist settings
         self.settings = QtCore.QSettings("rtm", "pyside_labeler")
         # Internal navigation guard
@@ -262,6 +345,19 @@ class LabelerWindow(QtWidgets.QMainWindow):
         tools_menu = self.menuBar().addMenu("Tools")
         act_test = tools_menu.addAction("Matching Test…")
         act_test.triggered.connect(self.on_matching_test)
+        
+        # Memory management menu
+        memory_menu = self.menuBar().addMenu("Memory")
+        act_clear_cache = memory_menu.addAction("Clear Image Cache")
+        act_clear_cache.triggered.connect(self._clear_image_cache)
+        act_memory_info = memory_menu.addAction("Memory Info")
+        act_memory_info.triggered.connect(self._show_memory_info)
+        act_load_more = memory_menu.addAction("Load More Data")
+        act_load_more.triggered.connect(self._load_more_data)
+        act_force_cleanup = memory_menu.addAction("Force Memory Cleanup")
+        act_force_cleanup.triggered.connect(self._force_memory_cleanup)
+        act_optimize_settings = memory_menu.addAction("Optimize Memory Settings")
+        act_optimize_settings.triggered.connect(self._optimize_memory_settings)
 
         # Central splitter
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -276,6 +372,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.image_label_infer.setScaledContents(False)
         self.image_label_infer.setBackgroundRole(QtGui.QPalette.Base)
         self.scroll_infer.setWidget(self.image_label_infer)
+        self.path_label_infer = QtWidgets.QLabel("")
+        self.path_label_infer.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.path_label_infer.setWordWrap(True)
+        self.path_label_infer.setStyleSheet("color:#666; font-size:11px;")
+        infer_panel = QtWidgets.QWidget()
+        infer_layout = QtWidgets.QVBoxLayout(infer_panel)
+        infer_layout.setContentsMargins(0, 0, 0, 0)
+        infer_layout.setSpacing(2)
+        infer_layout.addWidget(self.scroll_infer)
+        infer_layout.addWidget(self.path_label_infer)
         # Original panel
         self.scroll_orig = QtWidgets.QScrollArea()
         self.scroll_orig.setWidgetResizable(True)
@@ -283,6 +389,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.image_label_orig.setScaledContents(False)
         self.image_label_orig.setBackgroundRole(QtGui.QPalette.Base)
         self.scroll_orig.setWidget(self.image_label_orig)
+        self.path_label_orig = QtWidgets.QLabel("")
+        self.path_label_orig.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.path_label_orig.setWordWrap(True)
+        self.path_label_orig.setStyleSheet("color:#666; font-size:11px;")
+        orig_panel = QtWidgets.QWidget()
+        orig_layout = QtWidgets.QVBoxLayout(orig_panel)
+        orig_layout.setContentsMargins(0, 0, 0, 0)
+        orig_layout.setSpacing(2)
+        orig_layout.addWidget(self.scroll_orig)
+        orig_layout.addWidget(self.path_label_orig)
         # Extra panel (optional)
         self.scroll_extra = QtWidgets.QScrollArea()
         self.scroll_extra.setWidgetResizable(True)
@@ -290,15 +406,32 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.image_label_extra.setScaledContents(False)
         self.image_label_extra.setBackgroundRole(QtGui.QPalette.Base)
         self.scroll_extra.setWidget(self.image_label_extra)
+        self.path_label_extra = QtWidgets.QLabel("")
+        self.path_label_extra.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.path_label_extra.setWordWrap(True)
+        self.path_label_extra.setStyleSheet("color:#666; font-size:11px;")
+        extra_panel = QtWidgets.QWidget()
+        extra_layout = QtWidgets.QVBoxLayout(extra_panel)
+        extra_layout.setContentsMargins(0, 0, 0, 0)
+        extra_layout.setSpacing(2)
+        extra_layout.addWidget(self.scroll_extra)
+        extra_layout.addWidget(self.path_label_extra)
         # Assemble side-by-side
-        images_split.addWidget(self.scroll_infer)
-        images_split.addWidget(self.scroll_orig)
-        images_split.addWidget(self.scroll_extra)
+        images_split.addWidget(infer_panel)
+        images_split.addWidget(orig_panel)
+        images_split.addWidget(extra_panel)
         images_split.splitterMoved.connect(lambda *_: self.refresh_view())
 
         # Right: controls
         right = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout(right)
+
+        # Mode tabs (INF / EXT) → controls which label column is active by default
+        self.tab_mode = QtWidgets.QTabWidget()
+        self.tab_mode.addTab(QtWidgets.QWidget(), "INF")
+        self.tab_mode.addTab(QtWidgets.QWidget(), "EXT")
+        self.tab_mode.currentChanged.connect(self.on_change_mode_tab)
+        right_layout.addWidget(self.tab_mode)
 
         # Active label column
         self.cmb_label_col = QtWidgets.QComboBox()
@@ -316,6 +449,18 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.cmb_choice = QtWidgets.QComboBox()
         self.cmb_choice.currentTextChanged.connect(self.on_select_choice)
         right_layout.addWidget(self.cmb_choice)
+        # Bulk from predictions → review_label_inf
+        self.btn_from_preds_inf = QtWidgets.QPushButton("From preds → review_label_inf")
+        self.btn_from_preds_inf.clicked.connect(self.on_bulk_label_from_preds_inf)
+        right_layout.addWidget(self.btn_from_preds_inf)
+
+        # AS-IS / TO-BE mapping panel
+        self.grp_as_is_tobe = QtWidgets.QGroupBox("AS-IS / TO-BE")
+        self.as_is_tobe_layout = QtWidgets.QGridLayout(self.grp_as_is_tobe)
+        self.btn_apply_tobe = QtWidgets.QPushButton("Apply TO-BE → review_label_inf")
+        self.btn_apply_tobe.clicked.connect(self.on_apply_tobe_to_review_inf)
+        self.as_is_tobe_layout.addWidget(self.btn_apply_tobe, 0, 0, 1, 2)
+        right_layout.addWidget(self.grp_as_is_tobe)
 
         # Add new label column UI
         grp_add = QtWidgets.QGroupBox("Add Label Column")
@@ -380,8 +525,8 @@ class LabelerWindow(QtWidgets.QMainWindow):
 
         # Preview table of filtered items (sortable columns)
         self.table_preview = QtWidgets.QTableWidget()
-        self.table_preview.setColumnCount(4)
-        self.table_preview.setHorizontalHeaderLabels(["idx", "label", "path", "value"]) 
+        self.table_preview.setColumnCount(5)
+        self.table_preview.setHorizontalHeaderLabels(["idx", "label", "path", "INF", "EXT"]) 
         self.table_preview.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table_preview.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.table_preview.setSortingEnabled(True)
@@ -488,13 +633,55 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.refresh_view()
 
     # Data loading / configuration
-    def on_open_excel(self) -> None:
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Excel/CSV", os.getcwd(), "Excel/CSV (*.xlsx *.csv)")
+    def compute_tobe_choices(self) -> None:
+        self.tobe_choices = []
+        try:
+            if self.df is None or self.df.empty or "pred_seg_results" not in self.df.columns:
+                return
+            uniq: List[str] = []
+            seen = set()
+            for v in self.df["pred_seg_results"].fillna(""):
+                for item in parse_pred_list(v):
+                    s = str(item).strip()
+                    if not s:
+                        continue
+                    if s not in seen:
+                        seen.add(s)
+                        uniq.append(s)
+            # Keep order of first appearance; exclude 'OK' here (we'll pin it at front in UI)
+            self.tobe_choices = [c for c in uniq if c != "OK"]
+        except Exception:
+            self.tobe_choices = []
+    def load_excel_from_path(self, path: str) -> None:
         if not path:
             return
         try:
+            # Clear existing data and force garbage collection
+            self.df = None
+            self._image_cache.clear()
+            force_garbage_collection()
+            
+            # Check file size first
+            file_size_mb = os.path.getsize(path) / (1024 * 1024)
+            self.log(f"File size: {file_size_mb:.1f}MB")
+            
             if path.lower().endswith(".csv"):
-                self.df = pd.read_csv(path, encoding="utf-8-sig")
+                # For large CSV files, read in chunks
+                if file_size_mb > 50:  # Reduced threshold from 100MB to 50MB
+                    self.log(f"Large file detected ({file_size_mb:.1f}MB), loading in chunks...")
+                    # Read first chunk to get column info
+                    chunk_df = pd.read_csv(path, encoding="utf-8-sig", nrows=self.chunk_size)
+                    self.df = chunk_df
+                    self.log(f"Loaded first {self.chunk_size} rows. Use 'Load More' to load additional data.")
+                else:
+                    # Check memory before loading
+                    if check_memory_limit(self.max_memory_mb):
+                        QtWidgets.QMessageBox.warning(self, "Memory Warning", 
+                            f"Memory usage is high ({get_memory_usage():.1f}MB). Loading in chunks.")
+                        chunk_df = pd.read_csv(path, encoding="utf-8-sig", nrows=self.chunk_size)
+                        self.df = chunk_df
+                    else:
+                        self.df = pd.read_csv(path, encoding="utf-8-sig")
                 self.sheet_name = "inference_results"
                 # Create a working xlsx path next to csv
                 xlsx_path = os.path.splitext(path)[0] + ".xlsx"
@@ -502,11 +689,48 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     self.df.to_excel(writer, index=False, sheet_name=self.sheet_name)
                 self.excel_path = xlsx_path
             else:
+                # For Excel files, check memory usage
+                if check_memory_limit(self.max_memory_mb):
+                    QtWidgets.QMessageBox.warning(self, "Memory Warning", 
+                        f"Memory usage is high ({get_memory_usage():.1f}MB). Consider closing other applications.")
+                
                 # Read first sheet name
                 xl = pd.ExcelFile(path)
                 self.sheet_name = xl.sheet_names[0]
-                self.df = xl.parse(self.sheet_name)
+                
+                # For large Excel files, read in chunks
+                try:
+                    # Try to get row count without loading everything
+                    wb = load_workbook(path, read_only=True)
+                    ws = wb[self.sheet_name]
+                    row_count = ws.max_row
+                    wb.close()
+                    
+                    if row_count > 5000:  # Reduced from 10000 to 5000
+                        self.log(f"Large Excel file detected ({row_count} rows), loading first {self.chunk_size} rows...")
+                        self.df = pd.read_excel(path, sheet_name=self.sheet_name, nrows=self.chunk_size)
+                        self.log(f"Loaded first {self.chunk_size} rows. Use 'Load More' to load additional data.")
+                    else:
+                        # Check memory before loading
+                        if check_memory_limit(self.max_memory_mb):
+                            self.log("Memory usage high, loading in chunks...")
+                            self.df = pd.read_excel(path, sheet_name=self.sheet_name, nrows=self.chunk_size)
+                        else:
+                            self.df = xl.parse(self.sheet_name)
+                except Exception:
+                    # Fallback to normal loading
+                    self.df = xl.parse(self.sheet_name)
+                
                 self.excel_path = path
+            
+            # Check memory usage after loading
+            memory_usage = get_memory_usage()
+            self.log(f"Memory usage after loading: {memory_usage:.1f}MB")
+            
+            if memory_usage > self.max_memory_mb * 0.8:  # 80% of limit
+                QtWidgets.QMessageBox.warning(self, "Memory Warning", 
+                    f"High memory usage detected ({memory_usage:.1f}MB). Consider reducing data size.")
+            
             # Defaults
             self.output_excel_path = os.path.splitext(self.excel_path)[0] + "_labeled.xlsx"
             self.json_path = default_json_path(self.output_excel_path)
@@ -521,14 +745,17 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     merge_json_into_df(self.json_path, self.df, list(self.label_map.keys()))
                 except Exception:
                     pass
-                # Determine or add label columns in workbook later on export
+                # Build dynamic TO-BE choices from CSV predictions
+                try:
+                    self.compute_tobe_choices()
+                except Exception:
+                    pass
             self.filtered_indices = list(self.df.index) if self.df is not None else []
             self.current_idx = 0
             # Build label controls and filter controls
             self.refresh_label_controls()
             self.populate_filter_controls()
             # Default filter: origin_class=(all), label state=Unlabeled, sort by img_path if exists
-            # Set label state selector
             try:
                 idx = self.cmb_label_state.findText("Unlabeled")
                 if idx >= 0:
@@ -551,6 +778,13 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.settings.setValue("excel_path", path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open failed", str(e))
+            self.log(f"Error loading file: {str(e)}")
+
+    def on_open_excel(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open Excel/CSV", os.getcwd(), "Excel/CSV (*.xlsx *.csv)")
+        if not path:
+            return
+        self.load_excel_from_path(path)
 
     def on_set_images_base(self) -> None:
         path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Images Base", os.getcwd())
@@ -584,9 +818,9 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if excel and os.path.exists(excel):
             # Reuse same loading routine
             try:
-                self.on_open_excel.__func__(self)  # fallback if needed
+                self.load_excel_from_path(excel)
             except Exception:
-                self.load_excel_from_path(excel) if hasattr(self, 'load_excel_from_path') else None
+                pass
         if img_base and os.path.isdir(img_base):
             self.images_base = img_base
         if img_base_orig and os.path.isdir(img_base_orig):
@@ -645,8 +879,16 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if self.df is None or self.df.empty:
             QtWidgets.QMessageBox.information(self, "Matching Test", "Open Excel/CSV first.")
             return
-        if not self.images_base:
-            QtWidgets.QMessageBox.information(self, "Matching Test", "Set Images Base first.")
+        # Determine test target by current mode tab (INF vs EXT)
+        mode_idx = 0
+        try:
+            mode_idx = self.tab_mode.currentIndex() if hasattr(self, 'tab_mode') else 0
+        except Exception:
+            mode_idx = 0
+        testing_ext = (mode_idx == 1)
+        base_dir = self.images_base_extra if testing_ext else self.images_base
+        if not base_dir:
+            QtWidgets.QMessageBox.information(self, "Matching Test", "Set {} Images Base first.".format("Extra" if testing_ext else "Images"))
             return
         total_available = len(self.filtered_indices) if self.filtered_indices else len(self.df)
         default_n = min(200, total_available) if total_available > 0 else 0
@@ -663,14 +905,34 @@ class LabelerWindow(QtWidgets.QMainWindow):
         for ridx in sample:
             r = self.df.loc[ridx]
             p = str(r.get("img_path", "")) or str(r.get("filename", ""))
-            rp = resolve_image_path(self.images_base, p)
+            if testing_ext:
+                # Use same strategy as extra/original resolution: join rel; else search by filename patterns
+                rel = normalize_relative_path(p)
+                rp = os.path.join(base_dir, rel)
+                if not os.path.exists(rp):
+                    basename = os.path.basename(rel)
+                    base_no_ext, _ = os.path.splitext(basename)
+                    patterns = [
+                        os.path.join(base_dir, "**", basename),
+                        os.path.join(base_dir, "**", f"{base_no_ext}.*"),
+                        os.path.join(base_dir, "**", f"*{base_no_ext}*.*"),
+                    ]
+                    rp = None
+                    for pat in patterns:
+                        m = glob.glob(pat, recursive=True)
+                        if m:
+                            rp = m[0]
+                            break
+            else:
+                rp = resolve_image_path(base_dir, p)
             if rp and os.path.exists(rp):
                 ok_count += 1
             else:
                 if len(misses) < 10:
                     misses.append(p)
         rate = (ok_count / float(len(sample))) * 100.0
-        msg = f"Matched {ok_count}/{len(sample)} ({rate:.1f}%)"
+        mode_label = "EXT" if testing_ext else "INF"
+        msg = f"[{mode_label}] Matched {ok_count}/{len(sample)} ({rate:.1f}%)\nBase: {base_dir}"
         if misses:
             msg += "\n\nExamples not found:" + "\n- " + "\n- ".join(misses)
         QtWidgets.QMessageBox.information(self, "Matching Test", msg)
@@ -771,6 +1033,158 @@ class LabelerWindow(QtWidgets.QMainWindow):
         # Keep working order stable; update list/stats without re-sorting
         self._after_label_saved(row_idx)
 
+    def on_bulk_label_from_preds_inf(self) -> None:
+        # Build labels for each predicted item and join into review_label_inf
+        if self.df is None or not self.filtered_indices:
+            QtWidgets.QMessageBox.information(self, "Bulk from preds", "Open Excel/CSV first.")
+            return
+        row_idx = self.filtered_indices[self.current_idx]
+        row = self.df.loc[row_idx]
+        preds_raw = str(row.get("pred_seg_results", ""))
+        preds = parse_pred_list(preds_raw)
+        if not preds:
+            QtWidgets.QMessageBox.information(self, "Bulk from preds", "pred_seg_results 가 비어있습니다.")
+            return
+        choices = self.label_map.get("review_label_inf", [])
+        if not choices:
+            QtWidgets.QMessageBox.information(self, "Bulk from preds", "review_label_inf 선택지가 없습니다.")
+            return
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("From preds → review_label_inf")
+        lay = QtWidgets.QVBoxLayout(dlg)
+        form = QtWidgets.QFormLayout()
+        combo_boxes: List[QtWidgets.QComboBox] = []
+        for i, pred in enumerate(preds):
+            cb = QtWidgets.QComboBox(dlg)
+            cb.addItems(["(skip)"] + choices)
+            # Try to preselect something matching the pred prefix
+            pre_idx = 0
+            for j, opt in enumerate(choices, start=1):
+                if str(pred) and opt.startswith(str(pred)):
+                    pre_idx = j
+                    break
+            cb.setCurrentIndex(pre_idx)
+            combo_boxes.append(cb)
+            form.addRow(QtWidgets.QLabel(f"{i+1}. {pred}"), cb)
+        lay.addLayout(form)
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        lay.addWidget(btns)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        if dlg.exec() != QtWidgets.QDialog.Accepted:
+            return
+        selected: List[str] = []
+        for cb in combo_boxes:
+            val = cb.currentText().strip()
+            if val and val != "(skip)":
+                selected.append(val)
+        if not selected:
+            QtWidgets.QMessageBox.information(self, "Bulk from preds", "선택된 라벨이 없습니다.")
+            return
+        final_text = ". ".join(selected)
+        # Persist into DF and JSON
+        try:
+            self.df.at[row_idx, "review_label_inf"] = final_text
+        except Exception:
+            pass
+        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
+        self._queue_set_values(row_idx, {"review_label_inf": final_text}, keys_for_row)
+        # Ensure active column and refresh
+        self.active_label_col = "review_label_inf"
+        self.refresh_label_controls()
+        self.status.showMessage("Bulk labeled review_label_inf from preds")
+        self.log(f"Bulk from preds → review_label_inf: {final_text}")
+        self._after_label_saved(row_idx)
+
+    def _clear_as_is_tobe_panel(self) -> None:
+        try:
+            # Remove all widgets except the apply button at (0, 0)-(0,1)
+            for i in reversed(range(self.as_is_tobe_layout.count())):
+                item = self.as_is_tobe_layout.itemAt(i)
+                w = item.widget()
+                # Keep the first row (apply button)
+                if w is not None and w is not self.btn_apply_tobe:
+                    self.as_is_tobe_layout.removeWidget(w)
+                    w.setParent(None)
+        except Exception:
+            pass
+
+    def _refresh_as_is_tobe_panel(self) -> None:
+        # Build per-pred row: [AS-IS label]  [TO-BE dropdown]
+        if not hasattr(self, 'grp_as_is_tobe'):
+            return
+        self._tobe_combos: List[QtWidgets.QComboBox] = []
+        self._clear_as_is_tobe_panel()
+        if self.df is None or not self.filtered_indices:
+            return
+        row_idx = self.filtered_indices[self.current_idx]
+        row = self.df.loc[row_idx]
+        preds = parse_pred_list(str(row.get("pred_seg_results", "")))
+        # TO-BE dropdown: '(skip)' + OK + unique classes from CSV in order
+        base_choices = self.tobe_choices if hasattr(self, 'tobe_choices') and self.tobe_choices else []
+        choices = ["(skip)", "OK", *base_choices]
+        # Try to preselect based on existing review_label_inf split by '. '
+        existing = str(row.get("review_label_inf", ""))
+        existing_items: List[str] = [x.strip() for x in existing.split(". ") if x.strip()]
+        used = [False] * len(existing_items)
+        base_row = 1
+        for i, pred in enumerate(preds):
+            lbl = QtWidgets.QLabel(pred)
+            cb = QtWidgets.QComboBox()
+            cb.addItems(choices)
+            # Heuristic preselect: exact or prefix match to existing items
+            pre_idx = 0
+            for j, ex in enumerate(existing_items):
+                if not used[j] and (ex == pred or ex.startswith(pred)):
+                    try:
+                        k = choices.index(ex) if ex in choices else 0
+                    except Exception:
+                        k = 0
+                    if k > 0:
+                        pre_idx = k
+                        used[j] = True
+                        break
+            if pre_idx == 0:
+                # Fallback: choose first option that startswith pred
+                for k, opt in enumerate(choices):
+                    if k > 0 and opt.startswith(str(pred)):
+                        pre_idx = k
+                        break
+            cb.setCurrentIndex(pre_idx)
+            self.as_is_tobe_layout.addWidget(QtWidgets.QLabel("AS-IS"), base_row + i, 0)
+            self.as_is_tobe_layout.addWidget(lbl, base_row + i, 1)
+            self.as_is_tobe_layout.addWidget(QtWidgets.QLabel("TO-BE"), base_row + i, 2)
+            self.as_is_tobe_layout.addWidget(cb, base_row + i, 3)
+            self._tobe_combos.append(cb)
+
+    def on_apply_tobe_to_review_inf(self) -> None:
+        if self.df is None or not self.filtered_indices:
+            return
+        row_idx = self.filtered_indices[self.current_idx]
+        row = self.df.loc[row_idx]
+        selected: List[str] = []
+        try:
+            for cb in getattr(self, '_tobe_combos', []):
+                val = cb.currentText().strip()
+                if val and val != "(skip)":
+                    selected.append(val)
+        except Exception:
+            selected = []
+        if not selected:
+            QtWidgets.QMessageBox.information(self, "AS-IS / TO-BE", "선택된 TO-BE 라벨이 없습니다.")
+            return
+        final_text = ". ".join(selected)
+        try:
+            self.df.at[row_idx, "review_label_inf"] = final_text
+        except Exception:
+            pass
+        keys_for_row = {"img_path": str(row.get("img_path", "")), "filename": str(row.get("filename", ""))}
+        self._queue_set_values(row_idx, {"review_label_inf": final_text}, keys_for_row)
+        self.status.showMessage("Applied TO-BE → review_label_inf")
+        self.log(f"Apply TO-BE: {final_text}")
+        self._after_label_saved(row_idx)
+
     def _find_list_row_by_index(self, idx: int) -> int:
         try:
             # lookup first column in table
@@ -825,7 +1239,17 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if 0 <= li:
             # Always keep the row visible; just update columns
             self.table_preview.setItem(li, 1, QtWidgets.QTableWidgetItem("1" if label_val else "0"))
-            self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(label_val))
+            # Refresh INF/EXT columns from DF so active label goes to correct column
+            try:
+                inf_val = str(self.df.loc[row_idx].get("review_label_inf", "")) if "review_label_inf" in self.df.columns else ""
+            except Exception:
+                inf_val = ""
+            try:
+                ext_val = str(self.df.loc[row_idx].get("review_label_ext", "")) if "review_label_ext" in self.df.columns else ""
+            except Exception:
+                ext_val = ""
+            self.table_preview.setItem(li, 3, QtWidgets.QTableWidgetItem(inf_val))
+            self.table_preview.setItem(li, 4, QtWidgets.QTableWidgetItem(ext_val))
         # Force auto-advance to the immediate next row within current filtered order
         if self.current_idx < len(self.filtered_indices) - 1:
             self.current_idx += 1
@@ -845,6 +1269,32 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.refresh_label_controls()
             self.populate_filter_controls()
             self._populate_value_filter()
+            # Reflect into mode tab if it's one of predefined modes
+            try:
+                if name == "review_label_inf":
+                    self.tab_mode.blockSignals(True)
+                    self.tab_mode.setCurrentIndex(0)
+                    self.tab_mode.blockSignals(False)
+                elif name == "review_label_ext":
+                    self.tab_mode.blockSignals(True)
+                    self.tab_mode.setCurrentIndex(1)
+                    self.tab_mode.blockSignals(False)
+            except Exception:
+                pass
+
+    def on_change_mode_tab(self, idx: int) -> None:
+        # 0: INF → review_label_inf, 1: EXT → review_label_ext
+        try:
+            name = "review_label_inf" if idx == 0 else "review_label_ext"
+            if name != self.active_label_col:
+                self.active_label_col = name
+                self.refresh_label_controls()
+                self.populate_filter_controls()
+                self._populate_value_filter()
+                self._update_stats_quick()
+                self.update_summary()
+        except Exception:
+            pass
 
     def refresh_label_controls(self) -> None:
         # Reset combobox
@@ -949,11 +1399,33 @@ class LabelerWindow(QtWidgets.QMainWindow):
     def apply_filters(self) -> None:
         if self.df is None:
             return
-        df = self.df.copy()
+        
+        # Proactive memory cleanup before filtering
+        self._proactive_memory_cleanup()
+        
+        # Check memory before filtering
+        if self._manage_memory():
+            QtWidgets.QMessageBox.warning(self, "Memory Warning", 
+                "Memory usage is high. Some operations may be slower.")
+        
+        # Use copy only if necessary (for large datasets, avoid unnecessary copying)
+        if len(self.df) > 5000:  # Reduced from 10000 to 5000
+            # For large datasets, work with view instead of copy
+            df = self.df
+            use_view = True
+        else:
+            df = self.df.copy()
+            use_view = False
+        
         # origin_class filter
         origin_sel = self.cmb_origin.currentText()
         if origin_sel and origin_sel != "(all)" and "origin_class" in df.columns:
-            df = df[df["origin_class"].astype(str) == origin_sel]
+            if use_view:
+                mask = df["origin_class"].astype(str) == origin_sel
+                df = df[mask]
+            else:
+                df = df[df["origin_class"].astype(str) == origin_sel]
+        
         # text contains across img_path and pred
         t = self.edt_text.text().strip()
         if t:
@@ -963,10 +1435,12 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 if col in df.columns:
                     mask = mask | df[col].astype(str).str.lower().str.contains(t_low, na=False)
             df = df[mask]
+        
         # value filter for active label column
         val_sel = self.cmb_label_value.currentText() if hasattr(self, 'cmb_label_value') else "(all)"
         if val_sel and val_sel != "(all)" and self.active_label_col in df.columns:
             df = df[df[self.active_label_col].astype(str) == val_sel]
+        
         # bookmark-only filter (JSON-backed)
         if hasattr(self, 'chk_bookmarks') and self.chk_bookmarks.isChecked():
             try:
@@ -984,15 +1458,18 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 df = df[df.index.isin(bookmarked_ids)]
             except Exception:
                 pass
+        
         # label state filter
         state = self.cmb_label_state.currentText()
         if state == "Unlabeled" and self.active_label_col in df.columns:
             df = df[(df[self.active_label_col].isna()) | (df[self.active_label_col] == "")]
         elif state == "Labeled" and self.active_label_col in df.columns:
             df = df[(~df[self.active_label_col].isna()) & (df[self.active_label_col] != "")]
+        
         # legacy checkbox support
         if self.chk_unlabeled.isChecked() and self.active_label_col in df.columns:
             df = df[(df[self.active_label_col].isna()) | (df[self.active_label_col] == "")]
+        
         # pred_seg_results filter logic
         try:
             selected: List[str] = []
@@ -1020,40 +1497,58 @@ class LabelerWindow(QtWidgets.QMainWindow):
                     df = df[pd.Series(keep_mask, index=df.index)]
         except Exception:
             pass
+        
         # sort
         sort_col = self.cmb_sort_col.currentText()
         if sort_col and sort_col != "(no sort)" and sort_col in df.columns:
             df = df.sort_values(by=sort_col, ascending=not self.chk_sort_desc.isChecked(), kind="mergesort")
+        
         # update indices/preview list
         self.filtered_indices = list(df.index)
         self.current_idx = 0 if self.filtered_indices else 0
+        
         # Preserve current sort
         header = self.table_preview.horizontalHeader()
         sort_col = header.sortIndicatorSection() if hasattr(header, 'sortIndicatorSection') else -1
         sort_order = header.sortIndicatorOrder() if hasattr(header, 'sortIndicatorOrder') else QtCore.Qt.AscendingOrder
-        # Populate preview table (no artificial cap)
+        
+        # Populate preview table with row limit for performance
         self.table_preview.blockSignals(True)
         self.table_preview.setSortingEnabled(False)
         self.table_preview.clearContents()
-        self.table_preview.setRowCount(len(self.filtered_indices))
-        for r, idx in enumerate(self.filtered_indices):
+        
+        # Limit table rows for performance
+        display_indices = self.filtered_indices[:self.max_table_rows]
+        if len(self.filtered_indices) > self.max_table_rows:
+            self.log(f"Showing first {self.max_table_rows} of {len(self.filtered_indices)} filtered rows")
+        
+        self.table_preview.setRowCount(len(display_indices))
+        for r, idx in enumerate(display_indices):
             row = self.df.loc[idx]
             disp = str(row.get("img_path", row.get("filename", idx)))
-            label_val = str(row.get(self.active_label_col, "")) if self.active_label_col in self.df.columns else ""
-            label_flag = "1" if label_val else "0"  # for sorting
+            # INF/EXT values for list columns
+            inf_val = str(row.get("review_label_inf", "")) if "review_label_inf" in self.df.columns else ""
+            ext_val = str(row.get("review_label_ext", "")) if "review_label_ext" in self.df.columns else ""
+            # Active column value for quick flag
+            active_val = str(row.get(self.active_label_col, "")) if self.active_label_col in self.df.columns else ""
+            label_flag = "1" if active_val else "0"  # for sorting
             self.table_preview.setItem(r, 0, QtWidgets.QTableWidgetItem(str(idx)))
             self.table_preview.setItem(r, 1, QtWidgets.QTableWidgetItem(label_flag))
             self.table_preview.setItem(r, 2, QtWidgets.QTableWidgetItem(disp))
-            self.table_preview.setItem(r, 3, QtWidgets.QTableWidgetItem(label_val))
+            self.table_preview.setItem(r, 3, QtWidgets.QTableWidgetItem(inf_val))
+            self.table_preview.setItem(r, 4, QtWidgets.QTableWidgetItem(ext_val))
+        
         self.table_preview.setSortingEnabled(True)
         # Re-apply preserved sort if any
         if sort_col is not None and sort_col >= 0 and self.table_preview.rowCount() > 0:
             self.table_preview.sortByColumn(sort_col, sort_order)
         self.table_preview.blockSignals(False)
+        
         # default-select the top-most row
         if self.filtered_indices and self.table_preview.rowCount() > 0:
             self.current_idx = 0
             self.table_preview.selectRow(0)
+        
         # live stats (filtered + overall)
         total = len(self.df) if self.df is not None else 0
         overall_unlabeled = 0
@@ -1061,6 +1556,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
         if self.df is not None and self.active_label_col in self.df.columns:
             overall_unlabeled = int(((self.df[self.active_label_col].isna()) | (self.df[self.active_label_col] == "")).sum())
             overall_labeled = total - overall_unlabeled
+        
         # filtered counts
         f_total = len(self.filtered_indices)
         f_labeled = 0
@@ -1069,10 +1565,12 @@ class LabelerWindow(QtWidgets.QMainWindow):
             sub = self.df.loc[self.filtered_indices, self.active_label_col]
             f_unlabeled = int(((sub.isna()) | (sub == "")).sum())
             f_labeled = f_total - f_unlabeled
+        
         self.lbl_stats.setText(
             f"Filtered: {f_total} | Labeled: {f_labeled} | Unlabeled: {f_unlabeled}  ||  Overall: {total} (L:{overall_labeled} U:{overall_unlabeled})"
         )
         self.refresh_view()
+        
         # Ensure current row is selected in the list for visibility
         # ensure selected row in table remains in sync
         try:
@@ -1086,8 +1584,12 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 self.table_preview.blockSignals(False)
         except Exception:
             pass
+        
         # Update summary after any filter change
         self.update_summary()
+        
+        # Final memory check after filtering
+        self._proactive_memory_cleanup()
 
     def on_clear_sort(self) -> None:
         try:
@@ -1283,6 +1785,7 @@ class LabelerWindow(QtWidgets.QMainWindow):
                 for pattern in [
                     os.path.join(self.images_base_extra, "**", base),
                     os.path.join(self.images_base_extra, "**", f"{base_no_ext}.*"),
+                    os.path.join(self.images_base_extra, "**", f"*{base_no_ext}*.*"),
                 ]:
                     m = glob.glob(pattern, recursive=True)
                     if m:
@@ -1296,14 +1799,25 @@ class LabelerWindow(QtWidgets.QMainWindow):
             self.image_label_orig.setPixmap(QtGui.QPixmap())
             self.lbl_info.setText("Open Excel/CSV and set Images Bases.")
             return
+        
+        # Check memory before refreshing view
+        self._manage_memory()
+        
         row_idx = self.filtered_indices[self.current_idx]
         resolved_infer, resolved_orig, resolved_extra, disp = self._resolve_img_for_row(row_idx)
         self._set_image_on_label(self.image_label_infer, self.scroll_infer, resolved_infer)
         self._set_image_on_label(self.image_label_orig, self.scroll_orig, resolved_orig)
         self._set_image_on_label(self.image_label_extra, self.scroll_extra, resolved_extra)
+        # Show paths under each image
+        try:
+            self.path_label_infer.setText(resolved_infer or "-")
+            self.path_label_orig.setText(resolved_orig or "-")
+            self.path_label_extra.setText(resolved_extra or "-")
+        except Exception:
+            pass
         inf_txt = "OK" if resolved_infer else "not found"
         org_txt = "OK" if resolved_orig else "not found"
-        ext_txt = "OK" if resolved_extra else "not set"
+        ext_txt = "OK" if resolved_extra else ("not found" if self.images_base_extra else "not set")
         self.lbl_info.setText(
             f"Row {self.current_idx+1}/{len(self.filtered_indices)}  |  INF: {inf_txt}  |  ORG: {org_txt}  |  EXT: {ext_txt}\n{disp}"
         )
@@ -1335,26 +1849,245 @@ class LabelerWindow(QtWidgets.QMainWindow):
         self.lbl_banner.setStyleSheet(
             f"background:{color}22; color:{color}; border:2px solid {color}; font-size:24px; font-weight:800; padding:4px; border-radius:4px;"
         )
+        # Refresh AS-IS / TO-BE panel
+        try:
+            self._refresh_as_is_tobe_panel()
+        except Exception:
+            pass
 
     def _set_image_on_label(self, label: QtWidgets.QLabel, scroll: QtWidgets.QScrollArea, path: Optional[str]) -> None:
         if not path or not os.path.exists(path):
             label.setPixmap(QtGui.QPixmap())
             return
+        
+        # Check cache first
+        if path in self._image_cache:
+            pixmap = self._image_cache[path]
+        else:
+            # Load image with memory management
+            try:
+                # Check memory usage before loading
+                if check_memory_limit(self.max_memory_mb):
+                    # Clear old cache entries if memory is high
+                    self._clear_image_cache()
+                
+                pixmap = QtGui.QPixmap(path)
+                if not pixmap.isNull():
+                    # Add to cache (limit cache size)
+                    if len(self._image_cache) >= self.image_cache_size:
+                        # Remove oldest entry
+                        oldest_key = next(iter(self._image_cache))
+                        del self._image_cache[oldest_key]
+                    self._image_cache[path] = pixmap
+                else:
+                    label.setPixmap(QtGui.QPixmap())
+                    return
+            except Exception as e:
+                self.log(f"Error loading image {path}: {str(e)}")
+                label.setPixmap(QtGui.QPixmap())
+                return
+        
         if not getattr(self, 'fit_to_window', True):
-            label.setPixmap(QtGui.QPixmap(path))
+            label.setPixmap(pixmap)
             return
+        
         vp_size = scroll.viewport().size()
         if vp_size.width() <= 0 or vp_size.height() <= 0:
-            label.setPixmap(QtGui.QPixmap(path))
+            label.setPixmap(pixmap)
             return
-        pix = QtGui.QPixmap(path)
-        scaled = pix.scaled(vp_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        
+        # Scale image to fit viewport
+        scaled = pixmap.scaled(vp_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
         label.setPixmap(scaled)
+    
+    def _clear_image_cache(self):
+        """Clear image cache to free memory"""
+        self._image_cache.clear()
+        force_garbage_collection()
+        self.log("Image cache cleared to free memory")
+    
+    def _manage_memory(self):
+        """Proactive memory management"""
+        memory_usage = get_memory_usage()
+        if memory_usage > self.max_memory_mb * 0.8:  # Reduced from 0.9 to 0.8 for earlier intervention
+            self._clear_image_cache()
+            force_garbage_collection()
+            self.log(f"Memory management triggered: {memory_usage:.1f}MB")
+            return True
+        return False
+
+    def _proactive_memory_cleanup(self):
+        """More aggressive memory cleanup"""
+        memory_usage = get_memory_usage()
+        if memory_usage > self.max_memory_mb * 0.7:  # Even earlier intervention
+            self.log(f"Proactive memory cleanup: {memory_usage:.1f}MB")
+            # Clear image cache
+            self._image_cache.clear()
+            # Force garbage collection multiple times
+            for _ in range(3):
+                force_garbage_collection()
+            # Clear any temporary variables
+            if hasattr(self, '_temp_data'):
+                del self._temp_data
+            return True
+        return False
+
+    def _show_memory_info(self):
+        """Show current memory usage information"""
+        memory_usage = get_memory_usage()
+        cache_size = len(self._image_cache)
+        df_size = len(self.df) if self.df is not None else 0
+        
+        info = f"""Memory Usage: {memory_usage:.1f}MB
+Image Cache: {cache_size} images
+DataFrame Rows: {df_size}
+Filtered Rows: {len(self.filtered_indices)}
+Memory Limit: {self.max_memory_mb}MB"""
+        
+        QtWidgets.QMessageBox.information(self, "Memory Information", info)
+    
+    def _load_more_data(self):
+        """Load additional data in chunks"""
+        if not self.excel_path:
+            QtWidgets.QMessageBox.information(self, "Load More", "No file loaded.")
+            return
+        
+        try:
+            current_rows = len(self.df) if self.df is not None else 0
+            
+            if self.excel_path.lower().endswith(".csv"):
+                # Load next chunk of CSV
+                chunk_df = pd.read_csv(self.excel_path, encoding="utf-8-sig", 
+                                     skiprows=range(1, current_rows + 1), 
+                                     nrows=self.chunk_size)
+                if chunk_df.empty:
+                    QtWidgets.QMessageBox.information(self, "Load More", "No more data to load.")
+                    return
+                
+                # Append to existing DataFrame
+                self.df = pd.concat([self.df, chunk_df], ignore_index=True)
+                
+            else:
+                # For Excel files, load next chunk
+                chunk_df = pd.read_excel(self.excel_path, sheet_name=self.sheet_name,
+                                       skiprows=range(1, current_rows + 1),
+                                       nrows=self.chunk_size)
+                if chunk_df.empty:
+                    QtWidgets.QMessageBox.information(self, "Load More", "No more data to load.")
+                    return
+                
+                # Append to existing DataFrame
+                self.df = pd.concat([self.df, chunk_df], ignore_index=True)
+            
+            # Update UI
+            self.filtered_indices = list(self.df.index)
+            self.populate_filter_controls()
+            self.apply_filters()
+            
+            memory_usage = get_memory_usage()
+            self.log(f"Loaded {len(chunk_df)} more rows. Total: {len(self.df)}. Memory: {memory_usage:.1f}MB")
+            
+            if memory_usage > self.max_memory_mb * 0.8:
+                QtWidgets.QMessageBox.warning(self, "Memory Warning", 
+                    f"Memory usage is high ({memory_usage:.1f}MB). Consider clearing cache.")
+                    
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Load More Failed", str(e))
+            self.log(f"Error loading more data: {str(e)}")
+
+    def _force_memory_cleanup(self):
+        """Force immediate memory cleanup"""
+        self.log("Forcing memory cleanup...")
+        # Clear image cache
+        self._image_cache.clear()
+        # Force garbage collection multiple times
+        for i in range(5):
+            force_garbage_collection()
+        # Clear any temporary data
+        if hasattr(self, '_temp_data'):
+            del self._temp_data
+        memory_usage = get_memory_usage()
+        self.log(f"Memory cleanup completed. Current usage: {memory_usage:.1f}MB")
+        QtWidgets.QMessageBox.information(self, "Memory Cleanup", 
+            f"Memory cleanup completed.\nCurrent usage: {memory_usage:.1f}MB")
+
+    def _optimize_memory_settings(self):
+        """Optimize memory settings based on current system state"""
+        system_memory = get_system_memory()
+        current_usage = get_memory_usage()
+        
+        # Calculate optimal settings
+        available_memory = system_memory - current_usage
+        optimal_limit = min(1024, available_memory * 0.3)  # 30% of available memory
+        
+        # Update settings
+        old_limit = self.max_memory_mb
+        self.max_memory_mb = optimal_limit
+        
+        # Adjust other settings based on available memory
+        if available_memory < 2048:  # Less than 2GB available
+            self.chunk_size = 250
+            self.max_table_rows = 1000
+            self.image_cache_size = 3
+        elif available_memory < 4096:  # Less than 4GB available
+            self.chunk_size = 500
+            self.max_table_rows = 2000
+            self.image_cache_size = 5
+        else:  # 4GB+ available
+            self.chunk_size = 1000
+            self.max_table_rows = 3000
+            self.image_cache_size = 8
+        
+        info = f"""Memory settings optimized:
+System Memory: {system_memory:.0f}MB
+Current Usage: {current_usage:.1f}MB
+Available Memory: {available_memory:.0f}MB
+
+New Settings:
+- Memory Limit: {self.max_memory_mb:.0f}MB (was {old_limit:.0f}MB)
+- Chunk Size: {self.chunk_size}
+- Max Table Rows: {self.max_table_rows}
+- Image Cache Size: {self.image_cache_size}"""
+        
+        self.log("Memory settings optimized")
+        QtWidgets.QMessageBox.information(self, "Memory Settings Optimized", info)
+
+    def _select_all_pred_filters(self):
+        for cb in self.pred_checkboxes.values():
+            cb.setChecked(True)
+
+    def _select_none_pred_filters(self):
+        for cb in self.pred_checkboxes.values():
+            cb.setChecked(False)
 
 
 def main() -> None:
-    app = QtWidgets.QApplication(sys.argv)
+    parser = argparse.ArgumentParser(description="PySide6 Local Labeler")
+    parser.add_argument("--file", dest="file", type=str, default="", help="Path to CSV or Excel file to open")
+    parser.add_argument("--images", dest="images", type=str, default="", help="Path to inference/viz images base directory")
+    parser.add_argument("--orig-images", dest="orig_images", type=str, default="", help="Path to original images base directory")
+    parser.add_argument("--extra-images", dest="extra_images", type=str, default="", help="Path to extra images base directory")
+    args, qt_args = parser.parse_known_args()
+
+    app = QtWidgets.QApplication([sys.argv[0], *qt_args])
     w = LabelerWindow()
+
+    # Apply CLI args
+    try:
+        if args.file and os.path.exists(args.file):
+            w.load_excel_from_path(args.file)
+        if args.images and os.path.isdir(args.images):
+            w.images_base = args.images
+        if args.orig_images and os.path.isdir(args.orig_images):
+            w.images_base_orig = args.orig_images
+        if args.extra_images and os.path.isdir(args.extra_images):
+            w.images_base_extra = args.extra_images
+        # Refresh view if any base set
+        if args.images or args.orig_images or args.extra_images:
+            w.refresh_view()
+    except Exception:
+        pass
+
     w.show()
     sys.exit(app.exec())
 

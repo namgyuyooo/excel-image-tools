@@ -27,7 +27,7 @@ python pyside_labeler.py
   - `pred_seg_results`: 세그 결과 라벨 리스트(예: `SR-이물; 도금-변색`)
   - `seg_score`: 점수 등 수치
 
-추가로, 라벨 작업을 위한 컬럼을 자유롭게 생성할 수 있습니다. 기본 제공 라벨 컬럼은 `review_label` 입니다.
+추가로, 라벨 작업을 위한 컬럼을 자유롭게 생성할 수 있습니다. 기본 제공 라벨 컬럼은 모드별로 `review_label_inf`, `review_label_ext` 입니다.
 
 ## 이미지 경로 인식 및 매칭 규칙
 
@@ -49,6 +49,7 @@ CSV가 UTF-8 BOM(`utf-8-sig`)인 경우 자동 인식합니다.
   - Fit to window: 창 크기에 맞춰 자동 최대화(해제 시 원본 해상도로 스크롤)
 
 - 우측: 작업 패널(스크롤 가능)
+  - 라벨링 모드 탭: INF / EXT
   - Active Label Column 선택, 라벨 옵션 버튼(숫자 단축키 1~9), 드롭다운 편집
   - Filter/Sort: `origin_class`, 텍스트 검색, Label state(All/Labeled/Unlabeled), Only bookmarks, pred_seg_results 필터, Sort by/Desc, Clear sort
   - pred_seg_results 필터: 체크박스 다중 선택 + Exclusive(정확일치) / Exclude(제외)
@@ -88,10 +89,14 @@ CSV가 UTF-8 BOM(`utf-8-sig`)인 경우 자동 인식합니다.
   - 기본: 선택 항목 중 하나라도 포함되면 유지
 - Sort by: 임의 컬럼 정렬, Clear sort로 즉시 해제(작업 순서 유지에 유용)
 
-## 저장과 복원
+## 라벨 컬럼과 저장/복원
 
+- 기본 라벨 컬럼은 모드별로 분리됩니다:
+  - `review_label_inf`: INF(추론/시각화) 기준 라벨
+  - `review_label_ext`: EXT(추가 이미지) 기준 라벨
+- 탭 전환(INF/EXT)은 기본 활성 라벨 컬럼을 전환합니다. 필요시 `Active Label Column`에서 직접 변경할 수 있습니다.
 - 자동저장(JSON): 라벨/북마크/메모는 즉시 JSON(`{엑셀명}_labels.json`) 에 기록
-- 엑셀 내보내기: 새 파일로 복사 생성 후(JSON → Excel) 값만 일괄 반영
+- 엑셀 내보내기: 새 파일로 복사 생성 후(JSON → Excel) 값만 일괄 반영. 내보낼 때 두 라벨 컬럼이 엑셀 시트에 존재하지 않으면 자동으로 생성됩니다.
 - 세션 복원: 마지막 `excel_path`, `images_base`, `images_base_orig`, `images_base_extra` 는 `QSettings`에 저장되어 재시작 시 자동 복원
 
 ## 조작 팁
