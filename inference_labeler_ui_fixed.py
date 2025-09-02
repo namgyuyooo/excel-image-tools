@@ -33,8 +33,8 @@ CSV_CONFIGS = {
         "json_base": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/result"  # JSON 파일이 있는 기본 경로
     },
     "report": {
-        "csv_path": "/Users/yunamgyu/Downloads/report 2/2025-07-31.csv",
-        "images_base": "/Users/yunamgyu/Downloads/report 2/1-001",  # 실제 이미지 파일들이 있는 경로
+        "csv_path": "/Users/yunamgyu/Downloads/report/2025-07-31.csv",
+        "images_base": "/Users/yunamgyu/Downloads/report/images",  # report 폴더에 images 하위폴더가 있다고 가정
         "json_base": "/Users/yunamgyu/Downloads/report 2/result"  # JSON 파일이 있는 기본 경로
     }
 }
@@ -637,57 +637,35 @@ class SetupWindow(QtWidgets.QDialog):
     
     def _run_matching_test(self):
         """매칭 테스트 실행"""
-        print("🧪 매칭 테스트 시작...")
-        # 상태 바에 진행 상황 표시
-        if hasattr(self, 'parent') and hasattr(self.parent(), 'status'):
-            self.parent().status.showMessage("🧪 매칭 테스트 실행 중...")
-
         if not self.csv_path or not self.images_base:
-            print("❌ CSV 경로 또는 이미지 경로가 설정되지 않음")
             return
-
+        
         try:
-            print(f"📄 CSV 파일 로드 중: {self.csv_path}")
-            # 상태 바 업데이트
-            if hasattr(self, 'parent') and hasattr(self.parent(), 'status'):
-                self.parent().status.showMessage("📄 CSV 파일 로드 중...")
-
             # CSV 파일 로드
             df = pd.read_csv(self.csv_path, nrows=100)  # 처음 100행만 테스트
-            print(f"✅ CSV 로드 완료: {len(df)} 행, 컬럼: {list(df.columns)}")
-
-            if "File_path" not in df.columns:
-                print("❌ CSV 파일에 'File_path' 컬럼이 없음")
+            
+            if "img_path" not in df.columns:
                 self.test_result_label.setText("❌ CSV 파일에 'File_path' 컬럼이 없습니다.")
                 return
             
-            # 이미지 매칭 테스트 (최대 10개만 테스트)
+            # 이미지 매칭 테스트
             total_rows = len(df)
-            test_count = min(10, total_rows)  # 최대 10개만 테스트
             matched_count = 0
             sample_matches = []
-            print(f"🔍 이미지 매칭 테스트 시작: {test_count}개 행 검사 (총 {total_rows}개 중)")
-
-            for idx in range(test_count):
-                row = df.iloc[idx]
-                file_path = row["File_path"]
+            
+            for idx, row in df.iterrows():
+                file_path = row["img_path"]
                 if pd.isna(file_path) or not str(file_path).strip():
                     continue
 
-                print(f"🔎 파일 검색: {file_path}")
                 resolved_path = resolve_image_path(self.images_base, str(file_path))
-                if resolved_path and os.path.exists(resolved_path):
+                if os.path.exists(resolved_path):
                     matched_count += 1
-                    print(f"✅ 이미지 찾음: {os.path.basename(resolved_path)}")
                     if len(sample_matches) < 3:
                         sample_matches.append(os.path.basename(resolved_path))
-                else:
-                    print(f"❌ 이미지 못 찾음: {file_path}")
-
-            print(f"📈 매칭 결과: {matched_count}/{test_count}개 이미지 찾음")
             
             # 결과 표시
-            match_rate = (matched_count / test_count * 100) if test_count > 0 else 0
+            match_rate = (matched_count / total_rows * 100) if total_rows > 0 else 0
             
             if match_rate > 80:
                 status = "✅"
@@ -703,7 +681,7 @@ class SetupWindow(QtWidgets.QDialog):
                 self.start_btn.setEnabled(False)
             
             result_text = f"{status} 매칭 테스트 결과:\n"
-            result_text += f"테스트 행: {test_count:,}개 (전체: {total_rows:,}개)\n"
+            result_text += f"전체 행: {total_rows:,}개\n"
             result_text += f"매칭 성공: {matched_count:,}개\n"
             result_text += f"매칭률: {match_rate:.1f}%\n\n"
             
@@ -781,8 +759,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         print("🚀 InferenceLabelerWindow 초기화 시작")
         self.setWindowTitle("추론 결과 라벨링 도구")
         self.resize(1400, 900)
-        # UI readiness flag
-        self._ui_ready = False
 
         # 설정에서 경로 가져오기
         if settings:
@@ -816,7 +792,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self._last_filter_hash: Optional[str] = None
         
         # Unified labeling approach - single active column with as-is/to-be integration
-        self.active_label_col: str = "Result"
+        self.active_label_col: str = "action"
         self.label_choices: List[str] = [
             "OK",
             "애매한 OK", 
@@ -892,63 +868,272 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._connect_shortcuts()
         
-        # Defer data loading until UI is ready - wait for UI to settle
-        QtCore.QTimer.singleShot(100, self._auto_load_data)
-        # Defer session restore even more to ensure data is loaded first
-        QtCore.QTimer.singleShot(1000, self.restore_session_state)
+        # Auto-load the data
+        self._auto_load_data()
+        
+        # Try restore last session after data is loaded
+        QtCore.QTimer.singleShot(500, self.restore_session_state)
 
     def _auto_load_data(self):
         """Automatically load the CSV data on startup"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ _auto_load_data: UI not ready yet, retrying in 200ms...")
-            QtCore.QTimer.singleShot(200, self._auto_load_data)
-            return
-        
-        print("📊 UI 준비 완료, 데이터 로드 시작...")
         if os.path.exists(self.csv_path):
             self.load_csv_data()
         else:
             self.status.showMessage(f"CSV 파일을 찾을 수 없음: {self.csv_path}")
 
     def _build_ui(self) -> None:
-        """UI 빌드 - 고정된 순서로 안정적 초기화"""
-        print("🔧 UI 빌드 시작...")
-        
-        # Step 1: Central widget + QSplitter 생성
-        print("1️⃣ Central Widget + QSplitter 생성...")
-        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self.setCentralWidget(self.splitter)
-        
-        # Step 2: 좌/중/우 패널과 핵심 위젯들 모두 생성
-        print("2️⃣ 모든 핵심 위젯 생성...")
-        self._create_all_core_widgets()
-        
-        # Step 3: 시그널 연결
-        print("3️⃣ 시그널 연결...")
-        self._connect_all_signals()
-        
-        # Step 4: 기타 UI 요소들
-        print("4️⃣ 기타 UI 요소 생성...")
+        """UI를 단계별로 안전하게 구축"""
+        print("🔧 UI 구축 시작")
+
         try:
+            # 1단계: 기본 설정
             self.status = self.statusBar()
             self._create_status_widgets()
-            self._apply_theme()
-            self._create_toolbar()
-            self._create_menus()
-        except Exception as e:
-            print(f"❌ 기타 UI 요소 생성 오류: {e}")
-        
-        # UI 완전히 구축 완료
-        self._ui_ready = True
-        print("✅ UI 빌드 완료 (ui_ready=True)")
-        print("📊 모든 핵심 위젯이 안정적으로 초기화됨")
 
-    def _create_all_core_widgets(self) -> None:
-        """모든 핵심 위젯들을 고정된 순서로 생성"""
-        print("🏗️ 핵심 위젯 생성 시작...")
-        
-        # 좌측 패널: 이미지 뷰어
-        print("📸 이미지 패널 생성...")
+            # 2단계: 메뉴와 툴바 생성
+            self._create_menus_and_toolbar()
+
+            # 3단계: 메인 레이아웃 생성 (가장 중요)
+            self._create_main_layout()
+
+            print("✅ UI 구축 완료")
+
+        except Exception as e:
+            print(f"❌ UI 구축 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_menus_and_toolbar(self):
+        """메뉴와 툴바 생성"""
+        print("📋 메뉴 및 툴바 생성")
+
+        # 파일 메뉴
+        file_menu = self.menuBar().addMenu("파일")
+        act_reload = file_menu.addAction("데이터 새로고침")
+        act_export = file_menu.addAction("라벨을 엑셀로 내보내기")
+        file_menu.addSeparator()
+        act_save_session = file_menu.addAction("세션 상태 저장")
+        act_load_session = file_menu.addAction("세션 상태 복원")
+        file_menu.addSeparator()
+        act_quit = file_menu.addAction("종료")
+
+        # 연결
+        act_quit.triggered.connect(self.close)
+        act_reload.triggered.connect(self.load_csv_data)
+        act_export.triggered.connect(self.on_export_labels)
+        act_save_session.triggered.connect(self.save_session_state)
+        act_load_session.triggered.connect(self.restore_session_state)
+
+        # 메모리 관리 메뉴
+        memory_menu = self.menuBar().addMenu("메모리")
+        act_clear_cache = memory_menu.addAction("이미지 캐시 삭제")
+        act_clear_cache.triggered.connect(self._clear_image_cache)
+        act_memory_info = memory_menu.addAction("메모리 정보")
+        act_memory_info.triggered.connect(self._show_memory_info)
+
+    def _create_main_layout(self):
+        """메인 UI 레이아웃 생성"""
+        print("🏗️ 메인 레이아웃 생성")
+
+        try:
+            # 중앙 스플리터 생성
+            splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+            self.setCentralWidget(splitter)
+
+            # 1. 왼쪽 패널: 이미지 미리보기
+            self._create_image_panel(splitter)
+
+            # 2. 가운데 패널: 컨트롤
+            self._create_controls_panel(splitter)
+
+            # 3. 오른쪽 패널: 데이터 테이블
+            self._create_table_panel(splitter)
+
+            # 스플리터 크기 설정
+            splitter.setSizes([600, 400, 400])
+
+            print("✅ 메인 레이아웃 생성 완료")
+
+        except Exception as e:
+            print(f"❌ 메인 레이아웃 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_image_panel(self, splitter):
+        """이미지 미리보기 패널 생성"""
+        print("🖼️ 이미지 패널 생성")
+
+        try:
+            # 이미지 패널 생성
+            image_panel = QtWidgets.QWidget()
+            image_layout = QtWidgets.QVBoxLayout(image_panel)
+            image_layout.setContentsMargins(5, 5, 5, 5)
+
+            # 스크롤 영역 생성
+            self.scroll_area = QtWidgets.QScrollArea()
+            self.scroll_area.setWidgetResizable(True)
+            self.scroll_area.setMinimumWidth(300)
+
+            # 이미지 라벨 생성
+            self.image_label = QtWidgets.QLabel("이미지가 로드되지 않음")
+            self.image_label.setAlignment(QtCore.Qt.AlignCenter)
+            self.image_label.setMinimumSize(200, 200)
+            self.image_label.setStyleSheet("border: 2px dashed #ccc;")
+
+            # 스크롤 영역에 이미지 라벨 설정
+            self.scroll_area.setWidget(self.image_label)
+
+            # 이미지 상태 바
+            self.image_status_bar = QtWidgets.QLabel("이미지 상태: 준비")
+            self.image_status_bar.setStyleSheet("font-weight: bold; color: #666;")
+
+            # 경로 라벨
+            self.path_label = QtWidgets.QLabel("경로: 없음")
+            self.path_label.setWordWrap(True)
+
+            # 레이아웃에 추가
+            image_layout.addWidget(self.image_status_bar)
+            image_layout.addWidget(self.scroll_area)
+            image_layout.addWidget(self.path_label)
+
+            # 스플리터에 추가
+            splitter.addWidget(image_panel)
+
+            print("✅ 이미지 패널 생성 완료")
+
+        except Exception as e:
+            print(f"❌ 이미지 패널 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_controls_panel(self, splitter):
+        """컨트롤 패널 생성"""
+        print("🎛️ 컨트롤 패널 생성")
+
+        try:
+            # 컨트롤 패널 생성
+            controls_panel = QtWidgets.QWidget()
+            controls_layout = QtWidgets.QVBoxLayout(controls_panel)
+            controls_layout.setContentsMargins(5, 5, 5, 5)
+
+            # 타이틀
+            title_label = QtWidgets.QLabel("라벨링 컨트롤")
+            title_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1976d2; margin-bottom: 10px;")
+            controls_layout.addWidget(title_label)
+
+            # 현재 정보 표시
+            self.lbl_current_info = QtWidgets.QLabel("데이터가 로드되지 않음")
+            self.lbl_current_info.setWordWrap(True)
+            self.lbl_current_info.setStyleSheet("padding: 8px; border: 1px solid #ddd; border-radius: 4px;")
+            controls_layout.addWidget(self.lbl_current_info)
+
+            # 북마크 섹션
+            bookmark_group = QtWidgets.QGroupBox("북마크")
+            bookmark_layout = QtWidgets.QVBoxLayout(bookmark_group)
+
+            self.btn_toggle_bookmark = QtWidgets.QPushButton("북마크 토글 (B)")
+            self.lbl_bookmark_status = QtWidgets.QLabel("북마크: ❌")
+
+            bookmark_layout.addWidget(self.btn_toggle_bookmark)
+            bookmark_layout.addWidget(self.lbl_bookmark_status)
+
+            controls_layout.addWidget(bookmark_group)
+
+            # 라벨링 버튼들
+            labeling_group = QtWidgets.QGroupBox("빠른 라벨링")
+            labeling_layout = QtWidgets.QVBoxLayout(labeling_group)
+
+            # 라벨링 버튼들을 위한 컨테이너
+            self.choice_buttons_layout = QtWidgets.QVBoxLayout()
+
+            # 기본 라벨 버튼들 생성
+            self._create_label_buttons()
+
+            labeling_layout.addLayout(self.choice_buttons_layout)
+            controls_layout.addWidget(labeling_group)
+
+            # 빈 공간 채우기
+            controls_layout.addStretch()
+
+            # 스플리터에 추가
+            splitter.addWidget(controls_panel)
+
+            print("✅ 컨트롤 패널 생성 완료")
+
+        except Exception as e:
+            print(f"❌ 컨트롤 패널 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_table_panel(self, splitter):
+        """데이터 테이블 패널 생성"""
+        print("📊 테이블 패널 생성")
+
+        try:
+            # 테이블 패널 생성
+            table_panel = QtWidgets.QWidget()
+            table_layout = QtWidgets.QVBoxLayout(table_panel)
+            table_layout.setContentsMargins(5, 5, 5, 5)
+
+            # 타이틀
+            table_title = QtWidgets.QLabel("데이터 미리보기")
+            table_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #1976d2; margin-bottom: 10px;")
+            table_layout.addWidget(table_title)
+
+            # 테이블 생성
+            self.table = QtWidgets.QTableWidget()
+            self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+            self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+            self.table.setAlternatingRowColors(True)
+            self.table.verticalHeader().setVisible(False)
+            self.table.setWordWrap(False)
+            self.table.horizontalHeader().setStretchLastSection(False)
+            self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+
+            # 테이블 크기 설정
+            self.table.setMinimumHeight(400)
+
+            # 레이아웃에 추가
+            table_layout.addWidget(self.table)
+
+            # 스플리터에 추가
+            splitter.addWidget(table_panel)
+
+            print("✅ 테이블 패널 생성 완료")
+
+        except Exception as e:
+            print(f"❌ 테이블 패널 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _create_label_buttons(self):
+        """라벨링 버튼들 생성"""
+        try:
+            self.choice_buttons = {}
+
+            # 기본 라벨들
+            labels = ["OK", "애매한 OK", "NG", "애매한 NG", "보류", "SRLogicOK"]
+
+            for label_text in labels:
+                button = QtWidgets.QPushButton(label_text)
+                button.setMinimumHeight(35)
+                button.clicked.connect(lambda checked, text=label_text: self._assign_label_by_button(text))
+
+                self.choice_buttons[label_text] = button
+                self.choice_buttons_layout.addWidget(button)
+
+        except Exception as e:
+            print(f"❌ 라벨 버튼 생성 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _assign_label_by_button(self, label_text):
+        """버튼으로 라벨 할당"""
+        if hasattr(self, 'current_idx') and self.df is not None:
+            row_idx = self.filtered_indices[self.current_idx]
+            self._assign_label(row_idx, label_text)
+
+        # Column 1: Image preview
         self.scroll_area = QtWidgets.QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.image_label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
@@ -956,6 +1141,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.image_label.setBackgroundRole(QtGui.QPalette.Base)
         self.scroll_area.setWidget(self.image_label)
         
+        # Image label status bar (상단)
         self.image_status_bar = QtWidgets.QLabel("")
         self.image_status_bar.setAlignment(QtCore.Qt.AlignCenter)
         self.image_status_bar.setStyleSheet("""
@@ -973,73 +1159,43 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.path_label = QtWidgets.QLabel("")
         self.path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         self.path_label.setWordWrap(True)
+
         
         image_panel = QtWidgets.QWidget()
         image_layout = QtWidgets.QVBoxLayout(image_panel)
         image_layout.setContentsMargins(0, 0, 0, 0)
         image_layout.setSpacing(2)
+        
+        # Add status bar at the top
         image_layout.addWidget(self.image_status_bar)
         image_layout.addWidget(self.scroll_area)
         image_layout.addWidget(self.path_label)
-        
-        # 중간 패널: 컨트롤들
-        print("🎛️ 컨트롤 패널 생성...")
+
+        # Column 2: Controls and labeling
         controls_panel = QtWidgets.QWidget()
         controls_layout = QtWidgets.QVBoxLayout(controls_panel)
-        controls_layout.setSpacing(3)
-        controls_layout.setContentsMargins(3, 3, 3, 3)
+        controls_layout.setSpacing(3)  # Reduced spacing between sections
+        controls_layout.setContentsMargins(3, 3, 3, 3)  # Reduced margins
         
+        # Create scrollable controls area
         self.controls_scroll_area = QtWidgets.QScrollArea()
         self.controls_scroll_area.setWidgetResizable(True)
         self.controls_scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.controls_scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
+        self.controls_scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.controls_scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)  # Always show scrollbar to prevent jumping
         
+        # Create the actual controls widget
         self.controls_widget = QtWidgets.QWidget()
         self.controls_layout = QtWidgets.QVBoxLayout(self.controls_widget)
         self.controls_layout.setSpacing(3)
         self.controls_layout.setContentsMargins(3, 3, 3, 3)
         
+        # Set the controls widget as the scroll area's widget
         self.controls_scroll_area.setWidget(self.controls_widget)
+        
+        # Add scroll area to controls panel
         controls_layout.addWidget(self.controls_scroll_area)
-        
-        # 우측 패널: 테이블
-        print("📊 테이블 패널 생성...")  
-        table_panel = QtWidgets.QWidget()
-        table_layout = QtWidgets.QVBoxLayout(table_panel)
-        table_layout.setContentsMargins(3, 3, 3, 3)
-        table_layout.setSpacing(3)
-        
-        table_label = QtWidgets.QLabel("데이터 미리보기")
-        table_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
-        table_layout.addWidget(table_label)
-        
-        self.table = QtWidgets.QTableWidget()
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.table.setAlternatingRowColors(True)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setWordWrap(False)
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
-        self.table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        self.table.setMinimumHeight(400)
-        table_layout.addWidget(self.table, 1)
-        
-        # 패널들을 스플리터에 추가
-        self.splitter.addWidget(image_panel)
-        self.splitter.addWidget(controls_panel)
-        self.splitter.addWidget(table_panel)
-        self.splitter.setSizes([600, 400, 400])
-        
-        # 컨트롤 패널의 내부 위젯들 생성
-        self._create_control_contents()
-        
-        print("✅ 모든 핵심 위젯 생성 완료")
-    
-    def _create_control_contents(self) -> None:
-        """컨트롤 패널의 내부 컨텐츠 생성"""
-        print("🔧 컨트롤 내용 생성...")
-        
+
         # Progress dashboard
         progress_dashboard = self._create_progress_dashboard()
         self.controls_layout.addWidget(progress_dashboard)
@@ -1048,81 +1204,111 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.lbl_current_info = QtWidgets.QLabel("데이터가 로드되지 않음")
         self.controls_layout.addWidget(self.lbl_current_info)
 
-        # Bookmark section
+        # Bookmark and memo section moved to column 2
         grp_bookmark_memo = QtWidgets.QGroupBox("북마크")
         bookmark_memo_layout = QtWidgets.QVBoxLayout(grp_bookmark_memo)
         bookmark_memo_layout.setContentsMargins(5, 5, 5, 5)
         bookmark_memo_layout.setSpacing(5)
         
+        # Bookmark controls
         bookmark_controls = QtWidgets.QHBoxLayout()
         self.btn_toggle_bookmark = QtWidgets.QPushButton("북마크 토글 (B)")
+        self.btn_toggle_bookmark.clicked.connect(self.toggle_bookmark)
         self.lbl_bookmark_status = QtWidgets.QLabel("북마크: ❌")
         bookmark_controls.addWidget(self.btn_toggle_bookmark)
         bookmark_controls.addWidget(self.lbl_bookmark_status)
         bookmark_controls.addStretch()
         bookmark_memo_layout.addLayout(bookmark_controls)
+        
+
+        
         self.controls_layout.addWidget(grp_bookmark_memo)
 
-        # Quick labeling section
+        # Quick labeling section with collapsible UI
         grp_labeling = QtWidgets.QGroupBox()
         labeling_main_layout = QtWidgets.QVBoxLayout(grp_labeling)
+        
+        # Toggle button for quick labeling
+        # Section title for quick labeling
         labeling_title = QtWidgets.QLabel("빠른 라벨링")
         labeling_main_layout.addWidget(labeling_title)
         
+        # Quick labeling container with compact layout
         self.quick_labeling_container = QtWidgets.QWidget()
         quick_labeling_layout = QtWidgets.QVBoxLayout(self.quick_labeling_container)
-        quick_labeling_layout.setSpacing(2)
-        quick_labeling_layout.setContentsMargins(5, 2, 5, 2)
+        quick_labeling_layout.setSpacing(2)  # Reduce spacing
+        quick_labeling_layout.setContentsMargins(5, 2, 5, 2)  # Reduce margins
         
+        # Create scrollable area for buttons
         self.choice_buttons_scroll = QtWidgets.QScrollArea()
         self.choice_buttons_scroll.setWidgetResizable(True)
         self.choice_buttons_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.choice_buttons_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+
         
         self.choice_buttons_container = QtWidgets.QWidget()
         self.choice_buttons_layout = QtWidgets.QVBoxLayout(self.choice_buttons_container)
-        self.choice_buttons_layout.setSpacing(4)
+        self.choice_buttons_layout.setSpacing(4)  # Normal spacing
         self.choice_buttons_layout.setContentsMargins(4, 4, 4, 4)
         
         self.choice_buttons_scroll.setWidget(self.choice_buttons_container)
         quick_labeling_layout.addWidget(self.choice_buttons_scroll)
+        
         labeling_main_layout.addWidget(self.quick_labeling_container)
-        self.choice_buttons_scroll.setMinimumHeight(100)
+        
+        # Set size constraints for quick labeling section
         grp_labeling.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        
+        # Set scroll area height
+        self.choice_buttons_scroll.setMinimumHeight(100)
+        
         self.controls_layout.addWidget(grp_labeling)
 
-        # AS-IS/TO-BE section
+        # AS-IS / TO-BE mapping panel with collapsible UI
         grp_as_is_tobe = QtWidgets.QGroupBox()
         as_is_tobe_main_layout = QtWidgets.QVBoxLayout(grp_as_is_tobe)
+        
+        # Toggle button for AS-IS/TO-BE
+        # Section title for AS-IS/TO-BE
         as_is_tobe_title = QtWidgets.QLabel("AS-IS → TO-BE 라벨링")
         as_is_tobe_main_layout.addWidget(as_is_tobe_title)
         
+        # AS-IS/TO-BE container with fixed height to prevent layout jumping
         self.as_is_tobe_container = QtWidgets.QWidget()
-        self.as_is_tobe_container.setFixedHeight(200)
+        self.as_is_tobe_container.setFixedHeight(200)  # Fixed height to prevent layout jumping
         self.as_is_tobe_layout = QtWidgets.QVBoxLayout(self.as_is_tobe_container)
         self.as_is_tobe_layout.setSpacing(5)
         self.as_is_tobe_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Initially hide AS-IS/TO-BE container but keep space reserved
         self.as_is_tobe_container.setVisible(False)
-        self.as_is_tobe_container.setMaximumHeight(0)
+        self.as_is_tobe_container.setMaximumHeight(0)  # Collapse to 0 height when hidden
         
         as_is_tobe_main_layout.addWidget(self.as_is_tobe_container)
+        
+        # Set size constraints for AS-IS/TO-BE section
         grp_as_is_tobe.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        
         self.controls_layout.addWidget(grp_as_is_tobe)
 
-        # Filter controls
+        # Filter controls with collapsible sections
         grp_filter = QtWidgets.QGroupBox("필터 / 탐색")
         grp_filter_layout = QtWidgets.QVBoxLayout(grp_filter)
         
+        # Quick filter buttons
         quick_filter_widget = self._create_quick_filters()
         grp_filter_layout.addWidget(quick_filter_widget)
         
+        # Basic filters toggle button
+        # Section title for basic filters
         basic_filters_title = QtWidgets.QLabel("기본 필터")
         grp_filter_layout.addWidget(basic_filters_title)
         
+        # Basic filters container with compact layout
         self.basic_filters_widget = QtWidgets.QWidget()
         fl = QtWidgets.QGridLayout(self.basic_filters_widget)
-        fl.setSpacing(3)
-        fl.setContentsMargins(5, 2, 5, 2)
+        fl.setSpacing(3)  # Reduce spacing
+        fl.setContentsMargins(5, 2, 5, 2)  # Reduce margins
         
         self.chk_unlabeled = QtWidgets.QCheckBox("라벨 없는 항목만")
         self.cmb_label_state = QtWidgets.QComboBox()
@@ -1142,171 +1328,11 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         fl.addWidget(self.cmb_result_filter, 3, 1)
         fl.addWidget(self.chk_bookmarks, 4, 0)
 
+        # 오버레이 표시 토글
         self.chk_show_overlay = QtWidgets.QCheckBox("JSON 오버레이 표시")
         self.chk_show_overlay.setChecked(self.show_overlay)
-        fl.addWidget(self.chk_show_overlay, 5, 0)
-
-        grp_filter_layout.addWidget(self.basic_filters_widget)
-        grp_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-        self.controls_layout.addWidget(grp_filter)
-
-        # Pred filter section
-        grp_pred_filter = QtWidgets.QGroupBox()
-        pred_filter_main_layout = QtWidgets.QVBoxLayout(grp_pred_filter)
-        pred_filters_title = QtWidgets.QLabel("예측 결과 필터")
-        pred_filter_main_layout.addWidget(pred_filters_title)
-        
-        self.pred_filters_container = QtWidgets.QWidget()
-        pred_filter_layout = QtWidgets.QVBoxLayout(self.pred_filters_container)
-        
-        self.btn_clear_pred_filters = QtWidgets.QPushButton("모든 필터 해제")
-        pred_filter_layout.addWidget(self.btn_clear_pred_filters)
-        
-        self.pred_filter_scroll = QtWidgets.QScrollArea()
-        self.pred_filter_scroll.setMaximumHeight(200)
-        self.pred_filter_widget = QtWidgets.QWidget()
-        self.pred_filter_checkboxes_layout = QtWidgets.QVBoxLayout(self.pred_filter_widget)
-        self.pred_filter_scroll.setWidget(self.pred_filter_widget)
-        self.pred_filter_scroll.setWidgetResizable(True)
-        pred_filter_layout.addWidget(self.pred_filter_scroll)
-        
-        pred_filter_main_layout.addWidget(self.pred_filters_container)
-        grp_pred_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-        self.controls_layout.addWidget(grp_pred_filter)
-
-        # Navigation
-        nav_widget = QtWidgets.QWidget()
-        nav_layout = QtWidgets.QVBoxLayout(nav_widget)
-        
-        nav_buttons = QtWidgets.QHBoxLayout()
-        self.btn_prev = QtWidgets.QPushButton("이전")
-        self.btn_next = QtWidgets.QPushButton("다음")
-        nav_buttons.addWidget(self.btn_prev)
-        nav_buttons.addWidget(self.btn_next)
-        nav_layout.addLayout(nav_buttons)
-        
-        self.chk_auto_advance = QtWidgets.QCheckBox("리뷰 완료 후 자동 다음 이동")
-        self.chk_auto_advance.setChecked(self.auto_advance_enabled)
-        nav_layout.addWidget(self.chk_auto_advance)
-        
-        nav_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
-        self.controls_layout.addWidget(nav_widget)
-        
-        print("✅ 컨트롤 내용 생성 완료")
-    
-    def _connect_all_signals(self) -> None:
-        """모든 시그널 한번에 연결"""
-        print("🔗 시그널 연결 시작...")
-        
-        # Table signals
-        self.table.cellDoubleClicked.connect(self.on_table_double_click)
-        self.table.cellClicked.connect(self.on_table_click)
-        self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
-        self.table.verticalScrollBar().valueChanged.connect(self._on_table_scroll)
-        
-        # Navigation buttons
-        self.btn_prev.clicked.connect(self.on_prev)
-        self.btn_next.clicked.connect(self.on_next)
-        
-        # Bookmark
-        self.btn_toggle_bookmark.clicked.connect(self.toggle_bookmark)
-        
-        # Auto-advance
-        self.chk_auto_advance.toggled.connect(self.on_auto_advance_toggled)
-        
-        # Overlay toggle
         self.chk_show_overlay.toggled.connect(self._on_overlay_toggled)
-        
-        # Filter controls
-        self.chk_unlabeled.toggled.connect(self.apply_filters)
-        self.cmb_label_state.currentTextChanged.connect(self.apply_filters)
-        self.cmb_label_value.currentTextChanged.connect(self.apply_filters)
-        self.cmb_model_name.currentTextChanged.connect(self.apply_filters)
-        self.cmb_result_filter.currentTextChanged.connect(self.apply_filters)
-        self.chk_bookmarks.toggled.connect(self.apply_filters)
-        
-        # Pred filter
-        self.btn_clear_pred_filters.clicked.connect(self.clear_pred_filters)
-        
-        print("✅ 시그널 연결 완료")
-
-    def _create_minimal_ui(self):
-        """최소한의 UI 생성 - 디버깅용"""
-        print("🚨 최소 UI 생성 시작...")
-        try:
-            # 기본 레이아웃 생성
-            central_widget = QtWidgets.QWidget()
-            self.setCentralWidget(central_widget)
-            layout = QtWidgets.QVBoxLayout(central_widget)
-
-            # 간단한 라벨 추가
-            label = QtWidgets.QLabel("UI 테스트 - 최소 모드")
-            label.setAlignment(QtCore.Qt.AlignCenter)
-            label.setStyleSheet("font-size: 20px; color: red; font-weight: bold;")
-            layout.addWidget(label)
-
-            # 상태 정보 표시
-            info_label = QtWidgets.QLabel(f"CSV: {self.csv_path}\n이미지: {self.images_base}\nJSON: {self.json_base}")
-            info_label.setStyleSheet("font-size: 12px; color: blue;")
-            layout.addWidget(info_label)
-
-            # 버튼 추가
-            test_btn = QtWidgets.QPushButton("테스트 버튼")
-            test_btn.clicked.connect(lambda: print("테스트 버튼 클릭됨"))
-            layout.addWidget(test_btn)
-
-            print("✅ 최소 UI 생성 완료")
-        except Exception as e:
-            print(f"❌ 최소 UI 생성 오류: {e}")
-            import traceback
-            traceback.print_exc()
-
-
-    def _create_menus(self):
-        """메뉴 생성"""
-        # File menu
-        file_menu = self.menuBar().addMenu("파일")
-        act_reload = file_menu.addAction("데이터 새로고침")
-        act_export = file_menu.addAction("라벨을 엑셀로 내보내기")
-        file_menu.addSeparator()
-        act_save_session = file_menu.addAction("세션 상태 저장")
-        act_load_session = file_menu.addAction("세션 상태 복원")
-        file_menu.addSeparator()
-        act_quit = file_menu.addAction("종료")
-
-        act_quit.triggered.connect(self.close)
-        act_reload.triggered.connect(self.load_csv_data)
-        act_export.triggered.connect(self.on_export_labels)
-        act_save_session.triggered.connect(self.save_session_state)
-        act_load_session.triggered.connect(self.restore_session_state)
-
-        # Memory management menu
-        memory_menu = self.menuBar().addMenu("메모리")
-        act_clear_cache = memory_menu.addAction("이미지 캐시 삭제")
-        act_clear_cache.triggered.connect(self._clear_image_cache)
-        act_memory_info = memory_menu.addAction("메모리 정보")
-        act_memory_info.triggered.connect(self._show_memory_info)
-        act_force_cleanup = memory_menu.addAction("메모리 정리")
-        act_force_cleanup.triggered.connect(self._force_memory_cleanup)
-        act_performance_stats = memory_menu.addAction("성능 통계")
-        act_performance_stats.triggered.connect(self._show_performance_stats)
-
-        # Image matching debugging
-        act_image_debug = memory_menu.addAction("이미지 매칭 디버그")
-        act_image_debug.triggered.connect(self._debug_image_matching)
-
-        # Manual image path correction
-        act_fix_image_path = memory_menu.addAction("이미지 경로 수동 수정")
-        act_fix_image_path.triggered.connect(self._fix_image_path_manually)
-
-        # Quick fix for wrong matches
-        act_quick_fix = memory_menu.addAction("잘못된 매칭 빠른 수정")
-        act_quick_fix.triggered.connect(self._quick_fix_wrong_match)
-
-    def _apply_theme(self):
-        """모던 테마 적용"""
-        pass  # 현재는 빈 함수로 두고 나중에 구현
-
+        fl.addWidget(self.chk_show_overlay, 5, 0)
 
     def _on_overlay_toggled(self, checked: bool):
         """오버레이 표시 토글"""
@@ -1316,6 +1342,126 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             if self.current_idx < len(self.filtered_indices):
                 row_idx = self.filtered_indices[self.current_idx]
                 self._load_image_for_row(row_idx)
+
+        grp_filter_layout.addWidget(self.basic_filters_widget)
+        
+        # Set size constraints for filter section
+        grp_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        
+        self.controls_layout.addWidget(grp_filter)
+
+        # Unique_seg_result filter section with collapsible UI
+        grp_pred_filter = QtWidgets.QGroupBox()
+        pred_filter_main_layout = QtWidgets.QVBoxLayout(grp_pred_filter)
+        
+        # Toggle button for pred filters
+        # Section title for prediction filters
+        pred_filters_title = QtWidgets.QLabel("예측 결과 필터")
+        pred_filter_main_layout.addWidget(pred_filters_title)
+        
+        # Pred filters container
+        self.pred_filters_container = QtWidgets.QWidget()
+        pred_filter_layout = QtWidgets.QVBoxLayout(self.pred_filters_container)
+        
+        self.btn_clear_pred_filters = QtWidgets.QPushButton("모든 필터 해제")
+        self.btn_clear_pred_filters.clicked.connect(self.clear_pred_filters)
+        pred_filter_layout.addWidget(self.btn_clear_pred_filters)
+        
+        # Container for pred filter checkboxes with scroll
+        self.pred_filter_scroll = QtWidgets.QScrollArea()
+        self.pred_filter_scroll.setMaximumHeight(200)
+        self.pred_filter_widget = QtWidgets.QWidget()
+        self.pred_filter_checkboxes_layout = QtWidgets.QVBoxLayout(self.pred_filter_widget)
+        self.pred_filter_scroll.setWidget(self.pred_filter_widget)
+        self.pred_filter_scroll.setWidgetResizable(True)
+        pred_filter_layout.addWidget(self.pred_filter_scroll)
+        
+        pred_filter_main_layout.addWidget(self.pred_filters_container)
+        
+        # Set size constraints for prediction filter section
+        grp_pred_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        
+        self.controls_layout.addWidget(grp_pred_filter)
+
+        # Navigation and settings
+        nav_widget = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QVBoxLayout(nav_widget)
+        
+        # Navigation buttons
+        nav_buttons = QtWidgets.QHBoxLayout()
+        self.btn_prev = QtWidgets.QPushButton("이전")
+        self.btn_next = QtWidgets.QPushButton("다음")
+        self.btn_prev.clicked.connect(self.on_prev)
+        self.btn_next.clicked.connect(self.on_next)
+        nav_buttons.addWidget(self.btn_prev)
+        nav_buttons.addWidget(self.btn_next)
+        nav_layout.addLayout(nav_buttons)
+        
+        # Auto-advance setting
+        self.chk_auto_advance = QtWidgets.QCheckBox("리뷰 완료 후 자동 다음 이동")
+        self.chk_auto_advance.setChecked(self.auto_advance_enabled)
+        self.chk_auto_advance.toggled.connect(self.on_auto_advance_toggled)
+        nav_layout.addWidget(self.chk_auto_advance)
+        
+        # Set size constraints for navigation section
+        nav_widget.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
+        
+        self.controls_layout.addWidget(nav_widget)
+
+        # Column 3: Data preview table
+        table_panel = QtWidgets.QWidget()
+        table_layout = QtWidgets.QVBoxLayout(table_panel)
+        table_layout.setContentsMargins(3, 3, 3, 3)
+        table_layout.setSpacing(3)
+        
+        # Data table header
+        table_label = QtWidgets.QLabel("데이터 미리보기")
+        table_label.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
+        table_layout.addWidget(table_label)
+        
+
+        
+        self.table = QtWidgets.QTableWidget()
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)  # Hide row numbers
+        self.table.setWordWrap(False)
+        
+        # Enable column resizing by user
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        
+        self.table.cellDoubleClicked.connect(self.on_table_double_click)
+        self.table.cellClicked.connect(self.on_table_click)  # Also handle single clicks
+        
+        # Connect selection change event for image updates
+        self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
+        
+        # itemSelectionChanged is sufficient for handling all table selection changes
+        
+        # Connect scroll event for auto-loading more data
+        self.table.verticalScrollBar().valueChanged.connect(self._on_table_scroll)
+        
+        # Set table to expand and take remaining space
+        self.table.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.table.setMinimumHeight(400)  # Ensure minimum 50%+ of 900px window
+        
+        table_layout.addWidget(self.table, 1)  # Stretch factor 1 to take remaining space
+
+        # Add all three columns to splitter
+        splitter.addWidget(image_panel)
+        splitter.addWidget(controls_panel)
+        splitter.addWidget(table_panel)
+        splitter.setSizes([600, 400, 400])  # 3-column layout: image, controls, table
+
+        # Connect filter controls
+        self.chk_unlabeled.toggled.connect(self.apply_filters)
+        self.cmb_label_state.currentTextChanged.connect(self.apply_filters)
+        self.cmb_label_value.currentTextChanged.connect(self.apply_filters)
+        self.cmb_model_name.currentTextChanged.connect(self.apply_filters)
+        self.cmb_result_filter.currentTextChanged.connect(self.apply_filters)
+        self.chk_bookmarks.toggled.connect(self.apply_filters)
 
     def _create_status_widgets(self) -> None:
         """Create status bar widgets for real-time information display"""
@@ -1560,13 +1706,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             # Calculate progress percentage
             progress_percent = (labeled_count / total_items) * 100 if total_items > 0 else 0
             
-            # Update progress bar with null checks
-            if hasattr(self, 'progress_bar') and self.progress_bar is not None:
-                try:
-                    self.progress_bar.setValue(int(progress_percent))
-                    self.progress_bar.setFormat(f"{progress_percent:.1f}% ({labeled_count:,}/{total_items:,})")
-                except RuntimeError:
-                    pass  # Progress bar widget has been deleted
+            # Update progress bar
+            self.progress_bar.setValue(int(progress_percent))
             
             # Count different label types
             label_stats = {}
@@ -1584,11 +1725,10 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             if filtered_total != total_items:
                 stats_text += f" | 🔍 필터됨: {filtered_total:,}/{total_items:,}"
             
-            if hasattr(self, 'stats_label') and self.stats_label is not None:
-                try:
-                    self.stats_label.setText(stats_text)
-                except RuntimeError:
-                    pass  # Stats label widget has been deleted
+            self.stats_label.setText(stats_text)
+            
+            # Update progress bar text
+            self.progress_bar.setFormat(f"{progress_percent:.1f}% ({labeled_count:,}/{total_items:,})")
             
         except Exception as e:
             print(f"Progress dashboard update error: {e}")
@@ -1747,20 +1887,16 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def load_csv_data(self) -> None:
         """Load the CSV data and set up the interface - optimized for large files"""
-        print(f"📄 CSV 데이터 로드 시작: {self.csv_path}")
         if not os.path.exists(self.csv_path):
-            print(f"❌ CSV 파일 없음: {self.csv_path}")
             QtWidgets.QMessageBox.warning(self, "오류", f"CSV 파일을 찾을 수 없음: {self.csv_path}")
             return
-
+            
         try:
-            print("⏳ CSV 파일 로드 중...")
             # Show loading progress for large files
-            self.status.showMessage("📄 대용량 CSV 파일 로드 중...")
+            self.status.showMessage("대용량 CSV 파일 로드 중...")
             QtWidgets.QApplication.processEvents()  # Allow UI to update
-
+            
             # Load CSV with optimized settings for large files
-            print("📊 pandas로 CSV 읽는 중...")
             self.df = pd.read_csv(
                 self.csv_path,
                 low_memory=False,  # Read entire file at once for consistency
@@ -2084,12 +2220,9 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             while self.as_is_tobe_layout.count() > 0:
                 item = self.as_is_tobe_layout.takeAt(0)
                 if item and item.widget():
-                    try:
-                        item.widget().setParent(None)
-                        item.widget().deleteLater()
-                    except RuntimeError:
-                        pass  # Widget already deleted
-        except (RuntimeError, AttributeError) as e:
+                    item.widget().setParent(None)
+                    item.widget().deleteLater()
+        except Exception as e:
             print(f"Error clearing as_is_tobe_layout: {e}")
             return
         
@@ -2358,30 +2491,30 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
         
         row_idx = self.filtered_indices[self.current_idx]
-        File_path = self.df.at[row_idx, "File_path"]
+        img_path = self.df.at[row_idx, "img_path"]
 
-        if pd.isna(File_path) or not str(File_path).strip():
+        if pd.isna(img_path) or not str(img_path).strip():
             QtWidgets.QMessageBox.information(self, "디버그", "현재 행에 이미지 경로가 없습니다.")
             return
 
         # Detailed debugging information
         debug_info = f"이미지 매칭 디버그 정보:\n\n"
         debug_info += f"현재 행 인덱스: {row_idx}\n"
-        debug_info += f"CSV 이미지 경로: {File_path}\n"
+        debug_info += f"CSV 이미지 경로: {img_path}\n"
         debug_info += f"이미지 기본 경로: {self.images_base}\n\n"
         
         # Test different resolution strategies
         debug_info += "해결 시도 결과:\n"
         
         # 1. Direct path
-        if os.path.isabs(str(File_path)) and os.path.exists(str(File_path)):
-            debug_info += f"✓ 절대 경로 존재: {File_path}\n"
+        if os.path.isabs(str(img_path)) and os.path.exists(str(img_path)):
+            debug_info += f"✓ 절대 경로 존재: {img_path}\n"
         else:
-            debug_info += f"✗ 절대 경로 없음: {File_path}\n"
+            debug_info += f"✗ 절대 경로 없음: {img_path}\n"
         
         # 2. Normalized relative path
         from create_excel_from_seg_csv import normalize_relative_path
-        rel = normalize_relative_path(str(File_path))
+        rel = normalize_relative_path(str(img_path))
         debug_info += f"정규화된 상대 경로: {rel}\n"
         
         # 3. Join with base
@@ -2459,9 +2592,9 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
         
         row_idx = self.filtered_indices[self.current_idx]
-        current_File_path = self.df.at[row_idx, "File_path"]
+        current_img_path = self.df.at[row_idx, "img_path"]
 
-        if pd.isna(current_File_path) or not str(current_File_path).strip():
+        if pd.isna(current_img_path) or not str(current_img_path).strip():
             QtWidgets.QMessageBox.information(self, "수정", "현재 행에 이미지 경로가 없습니다.")
             return
 
@@ -2474,7 +2607,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(dialog)
 
         # Current path info
-        current_info = QtWidgets.QLabel(f"현재 CSV 경로: {current_File_path}")
+        current_info = QtWidgets.QLabel(f"현재 CSV 경로: {current_img_path}")
         current_info.setWordWrap(True)
         layout.addWidget(current_info)
         
@@ -2539,7 +2672,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             new_path = path_input.text().strip()
             if new_path:
                 # Update DataFrame
-                self.df.at[row_idx, "File_path"] = new_path
+                self.df.at[row_idx, "img_path"] = new_path
                 
                 # Refresh current view
                 self._load_image_for_row(row_idx)
@@ -2574,14 +2707,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
         
         row_idx = self.filtered_indices[self.current_idx]
-        current_File_path = self.df.at[row_idx, "File_path"]
+        current_img_path = self.df.at[row_idx, "img_path"]
 
-        if pd.isna(current_File_path) or not str(current_File_path).strip():
+        if pd.isna(current_img_path) or not str(current_img_path).strip():
             QtWidgets.QMessageBox.information(self, "빠른 수정", "현재 행에 이미지 경로가 없습니다.")
             return
         
         # Extract core identifier from CSV path
-        csv_basename = os.path.basename(str(current_File_path))
+        csv_basename = os.path.basename(str(current_img_path))
         core_id = csv_basename.replace('.bmp', '').replace('.jpg', '').replace('.png', '').replace('.jpeg', '')
         
         # Search for files with similar names
@@ -2614,7 +2747,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(dialog)
         
         # Info
-        info_label = QtWidgets.QLabel(f"CSV 경로: {current_File_path}\n일치하는 파일들:")
+        info_label = QtWidgets.QLabel(f"CSV 경로: {current_img_path}\n일치하는 파일들:")
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
         
@@ -2667,7 +2800,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             if current_item:
                 selected_path = current_item.text().replace(" ✓", "")
                 # Update DataFrame
-                self.df.at[row_idx, "File_path"] = selected_path
+                self.df.at[row_idx, "img_path"] = selected_path
                 
                 # Refresh current view
                 self._load_image_for_row(row_idx)
@@ -2941,9 +3074,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def _minimal_view_update(self) -> None:
         """Minimal view update for auto-advance - optimized for performance"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ _minimal_view_update: UI not ready yet")
-            return
         if self.df is None or not self.filtered_indices or self.current_idx >= len(self.filtered_indices):
             return
             
@@ -3073,51 +3203,24 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
     def _load_image_if_changed(self, row_idx: int) -> None:
         """Load image only if the path has changed - performance optimization"""
         print(f"🖼️ _load_image_if_changed 호출됨: row_idx={row_idx}")
-        if self.df is None or "File_path" not in self.df.columns:
+        if self.df is None or "img_path" not in self.df.columns:
             print("❌ 데이터프레임이 없거나 File_path 컬럼이 없음")
             return
 
-        File_path = self.df.at[row_idx, "File_path"]
-        if pd.isna(File_path) or not str(File_path).strip():
+        img_path = self.df.at[row_idx, "img_path"]
+        if pd.isna(img_path) or not str(img_path).strip():
             if self._last_image_path != "":
                 self.image_label.setText("이미지 경로 없음")
                 self.path_label.clear()
                 self._last_image_path = ""
             return
         
-        resolved_path = resolve_image_path(self.images_base, str(File_path))
-
-        # If resolve_image_path failed, try a more aggressive search
-        if not resolved_path:
-            # Extract filename from CSV path
-            csv_filename = os.path.basename(str(File_path))
-            if csv_filename:
-                # Search for file with same name anywhere in images_base
-                self.status.showMessage(f"🔍 이미지 검색 중: {csv_filename}")
-                QtWidgets.QApplication.processEvents()
-
-                for root, dirs, files in os.walk(self.images_base):
-                    for file in files:
-                        if file == csv_filename:
-                            resolved_path = os.path.join(root, file)
-                            print(f"✅ 대체 검색으로 이미지 찾음: {resolved_path}")
-                            self.status.showMessage(f"✅ 이미지 찾음: {csv_filename}")
-                            break
-                    if resolved_path:
-                        break
-
+        resolved_path = resolve_image_path(self.images_base, str(img_path))
+        
         # Only load if path changed
         if resolved_path != self._last_image_path:
-            if resolved_path:
-                self.status.showMessage(f"🖼️ 이미지 로드: {os.path.basename(resolved_path)}")
-                self._load_image_for_row(row_idx)
-            else:
-                self.status.showMessage(f"❌ 이미지 찾을 수 없음: {os.path.basename(str(File_path))}")
-                if self._last_image_path != "":
-                    self.image_label.setText("이미지 경로 없음")
-                    self.path_label.clear()
-                    self._last_image_path = ""
-            self._last_image_path = resolved_path or ""
+            self._load_image_for_row(row_idx)
+            self._last_image_path = resolved_path
 
     def _deferred_table_update(self) -> None:
         """Deferred table update with throttling for better performance"""
@@ -3319,9 +3422,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def apply_filters(self) -> None:
         """Apply various filters to determine which rows to show - optimized for large datasets"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ apply_filters: UI not ready yet")
-            return
         print("🔍 apply_filters 호출됨")
         if self.df is None:
             print("❌ self.df가 None입니다")
@@ -3384,9 +3484,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def _update_filter_results(self) -> None:
         """Update UI after filter results are ready"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ _update_filter_results: UI not ready yet")
-            return
         print("📊 _update_filter_results 호출됨")
         print(f"🔍 필터된 인덱스 수: {len(self.filtered_indices) if hasattr(self, 'filtered_indices') else 'None'}")
         
@@ -3416,9 +3513,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def refresh_view(self) -> None:
         """Refresh the current view (image and info)"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ refresh_view: UI not ready yet")
-            return
         print("🖼️ refresh_view 시작")
         print(f"📊 self.df는 {'존재' if self.df is not None else '없음'}")
         print(f"🔍 filtered_indices: {len(self.filtered_indices) if hasattr(self, 'filtered_indices') and self.filtered_indices else '없음'}")
@@ -3584,21 +3678,18 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
     def _load_image_for_row(self, row_idx: int) -> None:
         """Load and display image for the given row - safe and error-free"""
         try:
-            if not getattr(self, "_ui_ready", False):
-                print("⏸️ _load_image_for_row: UI not ready yet")
-                return
-            if self.df is None or "File_path" not in self.df.columns:
+            if self.df is None or "img_path" not in self.df.columns:
                 self._clear_image_display("데이터가 로드되지 않음")
                 return
 
             # Safe data access to handle pandas NA values
             try:
-                File_path = self.df.at[row_idx, "File_path"]
-                if pd.isna(File_path):
+                img_path = self.df.at[row_idx, "img_path"]
+                if pd.isna(img_path):
                     self._clear_image_display("이미지 경로 없음")
                     return
-                File_path_str = str(File_path).strip()
-                if not File_path_str:
+                img_path_str = str(img_path).strip()
+                if not img_path_str:
                     self._clear_image_display("이미지 경로 없음")
                     return
             except Exception as e:
@@ -3609,20 +3700,20 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             # JSON 정보 추출 및 오버레이 데이터 준비
             overlay_info = self._prepare_overlay_info(row_idx)
         
-            print(f"이미지 로드 시도: 행 {row_idx}, 경로: {File_path_str}")
+            print(f"이미지 로드 시도: 행 {row_idx}, 경로: {img_path_str}")
             print(f"  기본 경로: {self.images_base}")
             
             # Resolve image path with detailed debugging
-            resolved_path = resolve_image_path(self.images_base, File_path_str)
+            resolved_path = resolve_image_path(self.images_base, img_path_str)
             print(f"  해결된 경로: {resolved_path}")
             
             # Additional validation to prevent wrong matches
             if resolved_path:
-                expected_path = os.path.join(self.images_base, File_path_str)
+                expected_path = os.path.join(self.images_base, img_path_str)
                 if resolved_path != expected_path:
                     # Check if the resolved path is significantly different from expected
                     resolved_basename = os.path.basename(resolved_path)
-                    expected_basename = os.path.basename(File_path_str)
+                    expected_basename = os.path.basename(img_path_str)
                     
                     # Extract core identifiers from filenames for comparison
                     def extract_core_id(filename):
@@ -3651,7 +3742,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             
                     if not resolved_path or not os.path.exists(resolved_path):
                         # Enhanced error message with debugging info
-                        error_msg = f"이미지를 찾을 수 없음\nCSV 경로: {File_path_str}\n기본 경로: {self.images_base}"
+                        error_msg = f"이미지를 찾을 수 없음\nCSV 경로: {img_path_str}\n기본 경로: {self.images_base}"
                         if resolved_path:
                             error_msg += f"\n해결된 경로: {resolved_path}"
                             if not os.path.exists(resolved_path):
@@ -3663,18 +3754,18 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                         
                         # Log detailed debugging info
                         print(f"이미지 매칭 실패:")
-                        print(f"  CSV 경로: {File_path_str}")
+                        print(f"  CSV 경로: {img_path_str}")
                         print(f"  기본 경로: {self.images_base}")
                         print(f"  해결된 경로: {resolved_path}")
                         if resolved_path:
                             print(f"  파일 존재 여부: {os.path.exists(resolved_path)}")
                         
                         # Show warning about potential wrong matches
-                        if resolved_path and resolved_path != os.path.join(self.images_base, File_path_str):
+                        if resolved_path and resolved_path != os.path.join(self.images_base, img_path_str):
                             print(f"  ⚠️  경고: 잘못된 매칭 가능성 - CSV와 실제 파일이 다를 수 있습니다!")
                         
                         # Show status message
-                        self.status.showMessage(f"이미지를 찾을 수 없음: {os.path.basename(File_path_str)}", 3000)
+                        self.status.showMessage(f"이미지를 찾을 수 없음: {os.path.basename(img_path_str)}", 3000)
                         return
             
             # Load image with caching - optimized for speed
@@ -3696,15 +3787,11 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 return
             
             # Display image - optimized for speed
-            if self.fit_to_window and hasattr(self, 'scroll_area') and self.scroll_area is not None:
-                try:
-                    scroll_size = self.scroll_area.viewport().size()
-                    # Use FastTransformation for speed instead of SmoothTransformation
-                    scaled_pixmap = pixmap.scaled(scroll_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.FastTransformation)
-                    display_pixmap = scaled_pixmap
-                except RuntimeError:
-                    # Widget has been deleted, fall back to original size
-                    display_pixmap = pixmap
+            if self.fit_to_window:
+                scroll_size = self.scroll_area.viewport().size()
+                # Use FastTransformation for speed instead of SmoothTransformation
+                scaled_pixmap = pixmap.scaled(scroll_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.FastTransformation)
+                display_pixmap = scaled_pixmap
             else:
                 display_pixmap = pixmap
 
@@ -3712,17 +3799,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             if overlay_info.get('has_overlay', False):
                 display_pixmap = self._add_overlay_to_pixmap(display_pixmap, overlay_info)
 
-            if hasattr(self, 'image_label') and self.image_label is not None:
-                try:
-                    self.image_label.setPixmap(display_pixmap)
-                except RuntimeError:
-                    pass  # Widget has been deleted
-            
-            if hasattr(self, 'path_label') and self.path_label is not None:
-                try:
-                    self.path_label.setText(resolved_path)
-                except RuntimeError:
-                    pass  # Widget has been deleted
+            self.image_label.setPixmap(display_pixmap)
+            self.path_label.setText(resolved_path)
             print(f"이미지 로드 성공: {resolved_path}")
             print(f"  이미지 크기: {pixmap.width()}x{pixmap.height()}")
             print(f"  표시 모드: {'fit_to_window' if self.fit_to_window else 'original_size'}")
@@ -3987,88 +4065,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         except (RuntimeError, AttributeError) as e:
             print(f"⚠️ 위젯 스타일 설정 실패: {e}")
 
-    def _safe_widget_operation(self, widget, operation, *args, **kwargs) -> bool:
-        """Safely perform an operation on a widget, handling deleted C++ objects"""
-        try:
-            if widget is not None:
-                operation(*args, **kwargs)
-                return True
-        except (RuntimeError, AttributeError) as e:
-            print(f"⚠️ 위젯 작업 실패: {e}")
-        return False
-
-    def _safe_clear_layout(self, layout) -> None:
-        """Safely clear a layout, handling deleted C++ objects.
-        CRITICAL: Only clears dynamic inner layouts, NEVER core UI widgets.
-        """
-        if not layout:
-            return
-        
-        # UI must be ready to perform safe operations
-        if not getattr(self, "_ui_ready", False):
-            print("⚠️ _safe_clear_layout: UI not ready, skipping layout clear")
-            return
-            
-        try:
-            # Define ONLY allowed layouts - core UI widgets are NEVER cleared
-            allowed_layouts = set()
-            try:
-                if hasattr(self, 'choice_buttons_layout') and self.choice_buttons_layout:
-                    allowed_layouts.add(self.choice_buttons_layout)
-                if hasattr(self, 'pred_filter_checkboxes_layout') and self.pred_filter_checkboxes_layout:
-                    allowed_layouts.add(self.pred_filter_checkboxes_layout)
-                if hasattr(self, 'as_is_tobe_layout') and self.as_is_tobe_layout:
-                    allowed_layouts.add(self.as_is_tobe_layout)
-            except Exception:
-                pass
-
-            # STRICT: Only proceed if layout is explicitly allowed
-            if layout not in allowed_layouts:
-                print(f"⚠️ _safe_clear_layout: 허용되지 않은 레이아웃 요청 - 건너뜀 (layout: {type(layout)})")
-                return
-
-            print(f"🧹 Safe layout clear: {type(layout)} with {layout.count()} items")
-            
-            # Clear only child widgets, not the layout itself
-            while layout.count() > 0:
-                item = layout.takeAt(0)
-                if not item:
-                    continue
-                w = item.widget()
-                if w is not None:
-                    try:
-                        # Only delete dynamic widgets, not core UI components
-                        w.setParent(None)
-                        w.deleteLater()
-                    except RuntimeError:
-                        pass  # Widget already deleted
-                else:
-                    nested = item.layout()
-                    if nested is not None and nested in allowed_layouts:
-                        self._safe_clear_layout(nested)
-                        
-            print(f"✅ Layout cleared successfully")
-        except (RuntimeError, AttributeError) as e:
-            print(f"❌ Error clearing layout: {e}")
-            import traceback
-            traceback.print_exc()
-
     def _clear_image_display(self, message: str, path_info: str = "") -> None:
         """Safely clear image display with error message"""
         try:
-            if hasattr(self, 'image_label') and self.image_label is not None:
-                try:
-                    self.image_label.setText(message)
-                except RuntimeError:
-                    pass  # Widget has been deleted
-            if hasattr(self, 'path_label') and self.path_label is not None:
-                try:
-                    if path_info:
-                        self.path_label.setText(path_info)
-                    else:
-                        self.path_label.clear()
-                except RuntimeError:
-                    pass  # Widget has been deleted
+            self.image_label.setText(message)
+            if path_info:
+                self.path_label.setText(path_info)
+            else:
+                self.path_label.clear()
         except Exception as e:
             print(f"이미지 표시 지우기 중 오류: {e}")
 
@@ -4102,18 +4106,12 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def refresh_table(self) -> None:
         """Refresh the data table with smart loading - optimized for large datasets"""
-        if not getattr(self, "_ui_ready", False):
-            print("⏸️ refresh_table: UI not ready yet")
-            return
-        if self.df is None or not hasattr(self, 'table') or self.table is None:
+        if self.df is None:
             return
         
         # Get visible data (filtered rows only)
         if not self.filtered_indices:
-            try:
-                self.table.setRowCount(0)
-            except RuntimeError:
-                return  # Table widget has been deleted
+            self.table.setRowCount(0)
             return
         
         # Smart table loading: ensure current row is always visible
@@ -4123,17 +4121,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         visible_df = self.df.iloc[visible_indices]
         
         # Set up table - add model_name if available
-        display_cols = ["File_path", "Result", "Background_result", "Unique_seg_result", self.active_label_col]
+        display_cols = ["img_path", "Unique_seg_result", "Result", "detail", self.active_label_col]
         if "model_name" in visible_df.columns:
             display_cols.insert(-1, "model_name")  # Insert before label column
         display_cols = [col for col in display_cols if col in visible_df.columns]
         
-        try:
-            self.table.setRowCount(len(visible_df))
-            self.table.setColumnCount(len(display_cols))
-            self.table.setHorizontalHeaderLabels(display_cols)
-        except RuntimeError:
-            return  # Table widget has been deleted
+        self.table.setRowCount(len(visible_df))
+        self.table.setColumnCount(len(display_cols))
+        self.table.setHorizontalHeaderLabels(display_cols)
         
         # Debug: Check if data is available
         if len(visible_df) == 0:
@@ -4155,7 +4150,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                     cell_value = cell_value[:47] + "..."
                 elif col == "detail" and len(cell_value) > 100:
                     cell_value = cell_value[:97] + "..."
-                elif col == "File_path" and len(cell_value) > 80:
+                elif col == "img_path" and len(cell_value) > 80:
                     # File path는 파일명만 표시
                     import os
                     basename = os.path.basename(cell_value)
@@ -4191,14 +4186,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         
         # Set reasonable initial column widths
         for j, col in enumerate(display_cols):
-            if col == "File_path":
+            if col == "img_path":
                 self.table.setColumnWidth(j, 200)
             elif col == "Unique_seg_result":
                 self.table.setColumnWidth(j, 150)
             elif col == "Result":
                 self.table.setColumnWidth(j, 80)
-            elif col == "Background_result":
-                self.table.setColumnWidth(j, 120)
+            elif col == "detail":
+                self.table.setColumnWidth(j, 300)
             elif col == "model_name":
                 self.table.setColumnWidth(j, 100)
             elif col == self.active_label_col:
@@ -4738,6 +4733,22 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         except Exception as e:
             print(f"UI cleanup error: {e}")
 
+    def _safe_clear_layout(self, layout) -> None:
+        """Safely clear a layout and its widgets"""
+        if not layout:
+            return
+
+        try:
+            while layout.count() > 0:
+                item = layout.takeAt(0)
+                if item:
+                    if item.widget():
+                        item.widget().setParent(None)
+                        item.widget().deleteLater()
+                    elif item.layout():
+                        self._safe_clear_layout(item.layout())
+        except Exception as e:
+            print(f"Layout cleanup error: {e}")
 
     def closeEvent(self, event) -> None:
         """Handle application close event"""
@@ -4758,117 +4769,44 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             event.accept()
 
 
-# 전역 상태 바 변수
-global_status_bar = None
-
-def _get_saved_settings_from_qsettings() -> dict:
-    """Load last used paths from QSettings for direct UI testing."""
-    try:
-        settings = QtCore.QSettings("rtm", "inference_labeler")
-        csv_path = settings.value("last_csv_path", "", type=str)
-        images_base = settings.value("last_images_base", "", type=str)
-        json_base = settings.value("last_json_base", "", type=str)
-        csv_type = settings.value("last_csv_type", "inference", type=str)
-        return {
-            "csv_path": csv_path,
-            "images_base": images_base,
-            "json_base": json_base,
-            "csv_type": csv_type,
-        }
-    except Exception as e:
-        print(f"❌ QSettings 로드 오류: {e}")
-        return {
-            "csv_path": "",
-            "images_base": "",
-            "json_base": "",
-            "csv_type": "inference",
-        }
-
 def main():
-    global global_status_bar
-    # If launched with --use-saved, open main UI directly with saved settings (bypass SetupWindow)
-    if "--use-saved" in sys.argv:
-        print("🚀 --use-saved 플래그 감지: 저장된 설정으로 바로 메인 UI 실행")
-        app = QtWidgets.QApplication(sys.argv)
-        saved = _get_saved_settings_from_qsettings()
-        print(f"📊 저장된 설정: CSV={saved['csv_path']}, 이미지={saved['images_base']}, JSON={saved['json_base']}, 타입={saved['csv_type']}")
-        if not saved["csv_path"]:
-            print("❌ 저장된 CSV 경로가 없습니다. 기본 흐름으로 진행합니다.")
-        else:
-            window = InferenceLabelerWindow(saved)
-            global_status_bar = window.status
-            window.show()
-            return sys.exit(app.exec())
-    print("🚀 애플리케이션 시작")
     app = QtWidgets.QApplication(sys.argv)
-    print("✅ QApplication 생성 완료")
 
     # 설정 창 표시
-    print("📋 설정 창 생성 중...")
     setup_window = SetupWindow()
-    print("✅ 설정 창 생성 완료")
-
-    print("🔍 설정 창 실행...")
     result = setup_window.exec_()
-    print(f"📊 설정 창 결과: {result} (Accepted={QtWidgets.QDialog.Accepted})")
 
     if result != QtWidgets.QDialog.Accepted:
         # 사용자가 취소한 경우 종료
-        print("❌ 사용자가 취소함")
         setup_window.deleteLater()
         return
 
     # 설정값 가져오기
-    print("📋 설정값 가져오기...")
     settings = setup_window.get_settings()
-    print(f"📊 설정값: CSV={settings['csv_path']}, 이미지={settings['images_base']}, JSON={settings['json_base']}, 타입={settings['csv_type']}")
 
     # 설정된 경로 확인
-    print("🔍 경로 존재 여부 확인...")
     if not os.path.exists(settings["csv_path"]):
-        print(f"❌ CSV 파일 없음: {settings['csv_path']}")
         QtWidgets.QMessageBox.critical(None, "오류", f"CSV 파일을 찾을 수 없음: {settings['csv_path']}")
         setup_window.deleteLater()
         return
 
-    # 전역 상태 바에 메시지 표시
-    if global_status_bar:
-        global_status_bar.showMessage("🔍 경로 검증 중...")
-
     if not os.path.exists(settings["images_base"]):
-        print(f"⚠️ 이미지 디렉토리 없음: {settings['images_base']}")
         QtWidgets.QMessageBox.warning(None, "경고", f"이미지 디렉토리를 찾을 수 없음: {settings['images_base']}")
 
     if not os.path.exists(settings["json_base"]):
-        print(f"⚠️ JSON 디렉토리 없음: {settings['json_base']}")
         QtWidgets.QMessageBox.warning(None, "경고", f"JSON 디렉토리를 찾을 수 없음: {settings['json_base']}")
 
-    print("💾 설정값 저장 중...")
-    # 설정 창에서 경로 설정을 QSettings에 저장
-    setup_window.save_paths_to_settings()
+            # 설정 창에서 경로 설정을 QSettings에 저장
+        setup_window.save_paths_to_settings()
+        
+        # 설정 창 정리
+        setup_window.deleteLater()
 
-    # 설정 창 정리
-    print("🧹 설정 창 정리 중...")
-    setup_window.deleteLater()
+        # 라벨링 창 표시
+        window = InferenceLabelerWindow(settings)
+        window.show()
 
-    # 라벨링 창 표시
-    print("🏠 메인 라벨링 창 생성 중...")
-    window = InferenceLabelerWindow(settings)
-    print("✅ 메인 라벨링 창 생성 완료")
-
-    # 전역 상태 바 설정
-    global_status_bar = window.status
-
-    # 초기 상태 메시지
-    if global_status_bar:
-        global_status_bar.showMessage("메인 창 초기화 완료 - 데이터를 로드하는 중...")
-
-    print("🖥️ 메인 창 표시...")
-    window.show()
-    print("✅ 메인 창 표시 완료")
-
-    print("🎯 이벤트 루프 시작...")
-    sys.exit(app.exec())
+        sys.exit(app.exec())
 
 
 if __name__ == "__main__":

@@ -70,18 +70,41 @@ def resolve_image_path(images_base: str, csv_img_path: str) -> Optional[str]:
     if os.path.exists(viz_candidate):
         return viz_candidate
 
-    # Fallbacks: search by basename and by base name without extension, allowing suffixes like _viz
+    # More precise fallbacks: search by basename with stricter matching
     basename = os.path.basename(rel)
     base_no_ext, _ = os.path.splitext(basename)
-    patterns = [
-        os.path.join(images_base, "**", basename),               # exact filename
-        os.path.join(images_base, "**", f"{base_no_ext}.*"),     # any extension
-        os.path.join(images_base, "**", f"*{base_no_ext}*.*"),   # allow suffix/prefix (e.g., _viz)
-    ]
-    for pattern in patterns:
-        matches = glob.glob(pattern, recursive=True)
-        if matches:
-            return matches[0]
+    
+    # First try exact filename match
+    exact_pattern = os.path.join(images_base, "**", basename)
+    exact_matches = glob.glob(exact_pattern, recursive=True)
+    if exact_matches:
+        return exact_matches[0]
+    
+    # Then try exact base name with any extension (but not with suffixes)
+    base_pattern = os.path.join(images_base, "**", f"{base_no_ext}.*")
+    base_matches = glob.glob(base_pattern, recursive=True)
+    if base_matches:
+        # Filter out matches that have additional suffixes (like _viz, _p17, etc.)
+        filtered_matches = []
+        for match in base_matches:
+            match_basename = os.path.basename(match)
+            match_base_no_ext, _ = os.path.splitext(match_basename)
+            # Only accept if the base name is exactly the same (no additional suffixes)
+            if match_base_no_ext == base_no_ext:
+                filtered_matches.append(match)
+        
+        if filtered_matches:
+            return filtered_matches[0]
+    
+    # Finally, try with _viz suffix only if the original has a specific pattern
+    if not base_no_ext.endswith('_viz'):
+        viz_pattern = os.path.join(images_base, "**", f"{base_no_ext}_viz.*")
+        viz_matches = glob.glob(viz_pattern, recursive=True)
+        if viz_matches:
+            return viz_matches[0]
+    
+    # If no exact match found, return None instead of falling back to fuzzy matching
+    # This prevents wrong matches like 0129_U29_BC_p1.bmp -> 0048_U126_BC_p2_viz.png
     return None
 
 
