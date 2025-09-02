@@ -104,6 +104,120 @@ def parse_pred_list(value) -> List[str]:
     except Exception:
         return []
 
+
+def categorize_prediction(pred_value: str) -> str:
+    """Categorize prediction result into 'normal' or 'defect'"""
+    if not pred_value or pd.isna(pred_value):
+        return "unknown"
+
+    pred_str = str(pred_value).strip()
+
+    # First, check exact matches with known defect types
+    known_defects = ["돌기", "흑점", "색상얼룩", "찍힘", "SR이물", "SR금속"]
+    if pred_str in known_defects:
+        return "defect"
+
+    # Convert to lowercase for pattern matching
+    pred_lower = pred_str.lower()
+
+    # Normal/OK patterns (exact word matches to avoid false positives)
+    normal_keywords = [
+        "ok", "normal", "정상", "clear", "good", "pass", "양호",
+        "no defect", "no_defect", "none", "empty"
+    ]
+
+    # Check for exact normal keywords (avoid partial matches)
+    for keyword in normal_keywords:
+        if keyword == pred_lower:
+            return "normal"
+
+    # Check for normal patterns in longer strings (but be more specific)
+    if any(keyword in pred_lower for keyword in ["ok", "normal", "정상", "clear", "good", "pass", "양호"]):
+        return "normal"
+
+    # Defect patterns
+    defect_keywords = [
+        "defect", "fault", "error", "ng", "불량", "결함",
+        "stain", "spot", "scratch", "particle", "metal",
+        "이물", "금속"
+    ]
+
+    # Check for defect patterns
+    for keyword in defect_keywords:
+        if keyword in pred_lower:
+            return "defect"
+
+    # Additional defect pattern checks
+    if any(pattern in pred_lower for pattern in ["돌기", "흑점", "색상얼룩", "찍힘", "sr"]):
+        return "defect"
+
+    # If the value is very short and doesn't match anything, likely unknown
+    if len(pred_str) <= 2:
+        return "unknown"
+
+    # Default to unknown if no category found
+    return "unknown"
+
+
+def categorize_background(bg_value: str) -> str:
+    """Categorize background result into categories (clear/blurry/dark/etc.)"""
+    if not bg_value or pd.isna(bg_value):
+        return "unknown"
+
+    bg_str = str(bg_value).strip().lower()
+
+    # Check for exact matches first (highest priority)
+    if bg_str in ["clear", "good", "normal", "양호", "정상"]:
+        return "clear"
+    elif bg_str in ["blurry", "blur", "unclear", "흐림", "블러"]:
+        return "blurry"
+    elif bg_str in ["dark", "dim", "low_light", "어두움", "저조도"]:
+        return "dark"
+    elif bg_str in ["bright", "overexposed", "too_bright", "밝음", "과노출"]:
+        return "bright"
+    elif bg_str in ["noise", "noisy", "grainy", "잡음"]:
+        return "noisy"
+
+    # Pattern matching for compound words
+    # Dark patterns (check before bright to avoid conflicts)
+    if any(keyword in bg_str for keyword in ["dark", "dim", "low_light", "어두움", "저조도"]):
+        return "dark"
+
+    # Blurry patterns
+    if any(keyword in bg_str for keyword in ["blurry", "blur", "unclear", "흐림", "블러"]):
+        return "blurry"
+
+    # Bright patterns (check before clear to avoid conflicts)
+    if any(keyword in bg_str for keyword in ["overexposed", "밝음", "과노출", "too_bright"]):
+        return "bright"
+
+    # Clear patterns
+    if any(keyword in bg_str for keyword in ["clear", "good", "bright", "normal", "양호", "정상"]):
+        return "clear"
+
+    # Noisy patterns
+    if any(keyword in bg_str for keyword in ["noise", "noisy", "grainy", "잡음"]):
+        return "noisy"
+
+    # Default to unknown
+    return "unknown"
+
+
+def filter_predictions_by_category(predictions: List[str], category: str) -> List[str]:
+    """Filter prediction list by category (normal/defect/unknown)"""
+    if not predictions:
+        return []
+
+    if category == "normal":
+        return [pred for pred in predictions if categorize_prediction(pred) == "normal"]
+    elif category == "defect":
+        return [pred for pred in predictions if categorize_prediction(pred) == "defect"]
+    elif category == "unknown":
+        return [pred for pred in predictions if categorize_prediction(pred) == "unknown"]
+    else:
+        return predictions  # Return all if category not specified
+
+
 def extract_detail_from_json(json_path: str) -> List[str]:
     """JSON 파일에서 detail 정보를 추출합니다."""
     if not json_path or not os.path.exists(json_path):
@@ -394,7 +508,21 @@ class SetupWindow(QtWidgets.QDialog):
         
         csv_layout.addLayout(csv_path_layout)
         layout.addWidget(csv_group)
-        
+
+        # 라벨링 옵션
+        labeling_group = QtWidgets.QGroupBox("라벨링 옵션")
+        labeling_layout = QtWidgets.QVBoxLayout(labeling_group)
+
+        labeling_info = QtWidgets.QLabel("새로운 CSV 파일을 시작할 때의 라벨링 설정을 선택하세요.")
+        labeling_layout.addWidget(labeling_info)
+
+        # 새로운 라벨링 시작 옵션
+        self.skip_existing_labels_chk = QtWidgets.QCheckBox("새로운 라벨링 시작 (기존 라벨링 데이터 무시)")
+        self.skip_existing_labels_chk.setToolTip("체크하면 기존 JSON 파일의 라벨링 데이터를 로드하지 않고 완전히 새로운 상태로 시작합니다.")
+        labeling_layout.addWidget(self.skip_existing_labels_chk)
+
+        layout.addWidget(labeling_group)
+
         # 이미지 폴더 선택
         images_group = QtWidgets.QGroupBox("이미지 폴더 선택")
         images_layout = QtWidgets.QVBoxLayout(images_group)
@@ -725,7 +853,8 @@ class SetupWindow(QtWidgets.QDialog):
             "csv_path": self.csv_path,
             "images_base": self.images_base,
             "json_base": self.json_base,
-            "csv_type": self.csv_type
+            "csv_type": self.csv_type,
+            "skip_existing_labels": self.skip_existing_labels_chk.isChecked()
         }
 
     def save_paths_to_settings(self):
@@ -790,12 +919,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             self.images_base = settings.get("images_base", CSV_CONFIGS["inference"]["images_base"])
             self.json_base = settings.get("json_base", CSV_CONFIGS["inference"]["json_base"])
             csv_type = settings.get("csv_type", "inference")
+            self.skip_existing_labels = settings.get("skip_existing_labels", False)
             self.setWindowTitle(f"추론 결과 라벨링 도구 - {csv_type.upper()} ({os.path.basename(self.csv_path)})")
         else:
             # 기본값 사용
             self.csv_path = CSV_CONFIGS["inference"]["csv_path"]
             self.images_base = CSV_CONFIGS["inference"]["images_base"]
             self.json_base = CSV_CONFIGS["inference"]["json_base"]
+            self.skip_existing_labels = False
         
         # State
         self.df: Optional[pd.DataFrame] = None
@@ -816,7 +947,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self._last_filter_hash: Optional[str] = None
         
         # Unified labeling approach - single active column with as-is/to-be integration
-        self.active_label_col: str = "Result"
+        self.active_label_col: str = "Manual_Label"
         self.label_choices: List[str] = [
             "OK",
             "애매한 OK", 
@@ -1130,6 +1261,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.cmb_label_value = QtWidgets.QComboBox()
         self.cmb_model_name = QtWidgets.QComboBox()
         self.cmb_result_filter = QtWidgets.QComboBox()
+        self.cmb_background_filter = QtWidgets.QComboBox()
         self.chk_bookmarks = QtWidgets.QCheckBox("북마크만")
 
         fl.addWidget(self.chk_unlabeled, 0, 0)
@@ -1140,11 +1272,13 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         fl.addWidget(self.cmb_model_name, 2, 1)
         fl.addWidget(QtWidgets.QLabel("기본결과:"), 3, 0)
         fl.addWidget(self.cmb_result_filter, 3, 1)
-        fl.addWidget(self.chk_bookmarks, 4, 0)
+        fl.addWidget(QtWidgets.QLabel("배경결과:"), 4, 0)
+        fl.addWidget(self.cmb_background_filter, 4, 1)
+        fl.addWidget(self.chk_bookmarks, 5, 0)
 
         self.chk_show_overlay = QtWidgets.QCheckBox("JSON 오버레이 표시")
         self.chk_show_overlay.setChecked(self.show_overlay)
-        fl.addWidget(self.chk_show_overlay, 5, 0)
+        fl.addWidget(self.chk_show_overlay, 6, 0)
 
         grp_filter_layout.addWidget(self.basic_filters_widget)
         grp_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
@@ -1223,6 +1357,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.cmb_label_value.currentTextChanged.connect(self.apply_filters)
         self.cmb_model_name.currentTextChanged.connect(self.apply_filters)
         self.cmb_result_filter.currentTextChanged.connect(self.apply_filters)
+        self.cmb_background_filter.currentTextChanged.connect(self.apply_filters)
         self.chk_bookmarks.toggled.connect(self.apply_filters)
         
         # Pred filter
@@ -1495,9 +1630,13 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         quick_filters = [
             ("라벨없음", self._filter_unlabeled, "#ff9800"),
             ("OK만", self._filter_ok_only, "#4caf50"),
-            ("NG만", self._filter_ng_only, "#f44336"), 
-            ("북마크", self._filter_bookmarks, "#2196f3"),
-            ("전체보기", self._show_all, "#2196f3")
+            ("NG만", self._filter_ng_only, "#f44336"),
+            ("정상만", self._filter_normal_only, "#4caf50"),
+            ("결함만", self._filter_defect_only, "#f44336"),
+            ("배경고품질", self._filter_high_quality_bg, "#2196f3"),
+            ("배경저품질", self._filter_low_quality_bg, "#ff9800"),
+            ("북마크", self._filter_bookmarks, "#9c27b0"),
+            ("전체보기", self._show_all, "#757575")
         ]
         
         for text, func, color in quick_filters:
@@ -1526,6 +1665,127 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.cmb_label_state.setCurrentText("라벨됨")
         self.cmb_label_value.setCurrentText("NG")
         self.chk_bookmarks.setChecked(False)
+
+    def _filter_normal_only(self) -> None:
+        """Quick filter: show only items with normal predictions"""
+        # Clear other filters first
+        self.cmb_label_state.setCurrentText("전체")
+        self.cmb_label_value.setCurrentText("전체")
+        self.chk_bookmarks.setChecked(False)
+
+        # Clear existing pred filters
+        for checkbox in self.pred_filter_checkboxes.values():
+            checkbox.setChecked(False)
+        self.selected_pred_filters.clear()
+
+        # Select normal predictions only
+        if "Unique_seg_result" in self.df.columns:
+            # Find predictions that are categorized as "normal"
+            normal_preds = set()
+            for val in self.df["Unique_seg_result"].dropna():
+                pred_list = parse_pred_list(val)
+                for pred in pred_list:
+                    if categorize_prediction(pred) == "normal":
+                        normal_preds.add(pred)
+
+            # Select the normal prediction checkboxes
+            for pred in normal_preds:
+                if pred in self.pred_filter_checkboxes:
+                    self.pred_filter_checkboxes[pred].setChecked(True)
+                    self.selected_pred_filters.add(pred)
+
+        self.apply_filters()
+
+    def _filter_defect_only(self) -> None:
+        """Quick filter: show only items with defect predictions"""
+        # Clear other filters first
+        self.cmb_label_state.setCurrentText("전체")
+        self.cmb_label_value.setCurrentText("전체")
+        self.chk_bookmarks.setChecked(False)
+
+        # Clear existing pred filters
+        for checkbox in self.pred_filter_checkboxes.values():
+            checkbox.setChecked(False)
+        self.selected_pred_filters.clear()
+
+        # Select defect predictions only
+        if "Unique_seg_result" in self.df.columns:
+            # Find predictions that are categorized as "defect"
+            defect_preds = set()
+            for val in self.df["Unique_seg_result"].dropna():
+                pred_list = parse_pred_list(val)
+                for pred in pred_list:
+                    if categorize_prediction(pred) == "defect":
+                        defect_preds.add(pred)
+
+            # Select the defect prediction checkboxes
+            for pred in defect_preds:
+                if pred in self.pred_filter_checkboxes:
+                    self.pred_filter_checkboxes[pred].setChecked(True)
+                    self.selected_pred_filters.add(pred)
+
+        self.apply_filters()
+
+    def _filter_clear_bg_only(self) -> None:
+        """Quick filter: show only items with clear background"""
+        # Clear other filters first
+        self.cmb_label_state.setCurrentText("전체")
+        self.cmb_label_value.setCurrentText("전체")
+        self.chk_bookmarks.setChecked(False)
+
+        # Clear existing pred filters
+        for checkbox in self.pred_filter_checkboxes.values():
+            checkbox.setChecked(False)
+        self.selected_pred_filters.clear()
+
+        # Set background filter to clear
+        if "Background_result" in self.df.columns:
+            clear_values = []
+            for val in self.df["Background_result"].dropna():
+                if categorize_background(str(val)) == "clear":
+                    clear_values.append(str(val))
+
+            if clear_values:
+                # Set the first clear value in the background filter
+                self.cmb_background_filter.setCurrentText(clear_values[0])
+
+        self.apply_filters()
+
+    def _filter_high_quality_bg(self) -> None:
+        """Quick filter: show only items with high quality background (>= 0.99)"""
+        # Clear other filters first
+        self.cmb_label_state.setCurrentText("전체")
+        self.cmb_label_value.setCurrentText("전체")
+        self.chk_bookmarks.setChecked(False)
+
+        # Clear existing pred filters
+        for checkbox in self.pred_filter_checkboxes.values():
+            checkbox.setChecked(False)
+        self.selected_pred_filters.clear()
+
+        # Set background filter to high quality
+        if "Background_score" in self.df.columns:
+            self.cmb_background_filter.setCurrentText("고품질배경")
+
+        self.apply_filters()
+
+    def _filter_low_quality_bg(self) -> None:
+        """Quick filter: show only items with low quality background (< 0.95)"""
+        # Clear other filters first
+        self.cmb_label_state.setCurrentText("전체")
+        self.cmb_label_value.setCurrentText("전체")
+        self.chk_bookmarks.setChecked(False)
+
+        # Clear existing pred filters
+        for checkbox in self.pred_filter_checkboxes.values():
+            checkbox.setChecked(False)
+        self.selected_pred_filters.clear()
+
+        # Set background filter to low quality
+        if "Background_score" in self.df.columns:
+            self.cmb_background_filter.setCurrentText("저품질배경")
+
+        self.apply_filters()
 
     def _filter_bookmarks(self) -> None:
         """Quick filter: show only bookmarked items"""
@@ -1776,18 +2036,21 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             # Set up JSON path
             self.json_path = default_json_path(self.csv_path.replace('.csv', '.xlsx'))
             
-            # Ensure the review label column exists
-            if self.active_label_col not in self.df.columns:
-                self.df[self.active_label_col] = ""
-                ensure_object_dtype(self.df, self.active_label_col)
+            # Manual_Label should NOT exist in CSV - it's for user labeling only
+            if self.active_label_col in self.df.columns:
+                print(f"⚠️ 경고: CSV 파일에 '{self.active_label_col}' 컬럼이 이미 존재합니다.")
+                print("   이 컬럼은 사용자가 직접 채워야 하는 컬럼입니다.")
+                print("   기존 데이터를 백업하고 컬럼을 제거합니다.")
 
-            # Set default values from Result column if action column is empty
-            if "Result" in self.df.columns:
-                for idx, row in self.df.iterrows():
-                    if pd.isna(self.df.at[idx, self.active_label_col]) or str(self.df.at[idx, self.active_label_col]).strip() == "":
-                        result_val = row["Result"]
-                        if pd.notna(result_val) and str(result_val).strip():
-                            self.df.at[idx, self.active_label_col] = str(result_val).strip()
+                # Remove the existing Manual_Label column since it shouldn't be in CSV
+                self.df = self.df.drop(columns=[self.active_label_col])
+                print(f"✅ 기존 '{self.active_label_col}' 컬럼을 제거했습니다.")
+
+            # Create fresh Manual_Label column for user labeling
+            self.df[self.active_label_col] = ""
+            ensure_object_dtype(self.df, self.active_label_col)
+            print(f"✅ 새로운 빈 '{self.active_label_col}' 컬럼을 생성했습니다.")
+            print("   이 컬럼은 사용자가 직접 라벨링한 결과를 저장합니다.")
 
             # Extract details from JSON files
             if "detail" not in self.df.columns:
@@ -1808,14 +2071,25 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                         if details:
                             self.df.at[idx, "detail"] = "; ".join(details)
             
-            # Load existing labels
-            merge_json_into_df(self.json_path, self.df, [self.active_label_col])
+            # Manual_Label은 사용자가 직접 채워야 하는 컬럼이므로 기존 데이터를 로드하지 않음
+            # 다른 컬럼들의 기존 데이터는 로드할 수 있음 (필요시)
+            print(f"ℹ️ '{self.active_label_col}' 컬럼은 사용자가 직접 라벨링해야 하는 빈 컬럼입니다.")
+            print("   기존 JSON 데이터를 로드하지 않습니다.")
+
+            # 다른 컬럼들의 기존 데이터 로드 (skip_existing_labels 설정에 따라)
+            other_columns = [col for col in self.df.columns if col != self.active_label_col]
+            if not getattr(self, 'skip_existing_labels', False) and other_columns:
+                merge_json_into_df(self.json_path, self.df, other_columns)
+                print("✅ 다른 컬럼들의 기존 데이터를 로드했습니다.")
+            elif other_columns:
+                print("⏭️ 새로운 시작 - 다른 컬럼들의 기존 데이터도 무시합니다.")
             
             # Extract TO-BE choices from Unique_seg_result
             self.compute_tobe_choices()
             self.compute_pred_filter_choices()
             self.setup_model_name_filter()
             self.setup_result_filter()
+            self.setup_background_filter()
 
             # Debug: Check loaded data
             print(f"Loaded DataFrame shape: {self.df.shape}")
@@ -1948,6 +2222,33 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         unique_results = sorted(self.df["Result"].dropna().unique())
         self.cmb_result_filter.addItems(unique_results)
 
+    def setup_background_filter(self) -> None:
+        """Set up Background_result filter dropdown"""
+        self.cmb_background_filter = self.findChild(QtWidgets.QComboBox, "cmb_background_filter")
+        if not self.cmb_background_filter:
+            # If not found, create it in the basic filters section
+            self.cmb_background_filter = QtWidgets.QComboBox()
+            self.cmb_background_filter.setObjectName("cmb_background_filter")
+
+        self.cmb_background_filter.clear()
+        self.cmb_background_filter.addItem("전체")
+
+        if self.df is None:
+            return
+
+        # Add quality-based filter options if Background_score exists
+        if "Background_score" in self.df.columns:
+            self.cmb_background_filter.addItem("고품질배경")
+            self.cmb_background_filter.addItem("일반배경")
+            self.cmb_background_filter.addItem("저품질배경")
+
+        # Add original Background_result values if column exists
+        if "Background_result" in self.df.columns:
+            unique_bg_results = sorted(self.df["Background_result"].dropna().unique())
+            for bg_result in unique_bg_results:
+                if bg_result not in ["고품질배경", "일반배경", "저품질배경"]:  # Avoid duplicates
+                    self.cmb_background_filter.addItem(bg_result)
+
     def refresh_pred_filter_controls(self) -> None:
         """Update Unique_seg_result filter checkboxes"""
         # Check if layout is valid
@@ -1967,14 +2268,60 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
         
         self.pred_filter_checkboxes.clear()
-        
-        # Create checkboxes for each unique pred value
-        for i, choice in enumerate(self.pred_filter_choices):
-            checkbox = QtWidgets.QCheckBox(choice)
-            checkbox.toggled.connect(self.on_pred_filter_changed)
-            self.pred_filter_checkboxes[choice] = checkbox
 
-            self.pred_filter_checkboxes_layout.addWidget(checkbox)
+        # Group predictions by category
+        normal_preds = []
+        defect_preds = []
+        unknown_preds = []
+
+        for choice in self.pred_filter_choices:
+            category = categorize_prediction(choice)
+            if category == "normal":
+                normal_preds.append(choice)
+            elif category == "defect":
+                defect_preds.append(choice)
+            else:
+                unknown_preds.append(choice)
+
+        # Create section headers and checkboxes
+        if normal_preds:
+            # Normal predictions section
+            normal_label = QtWidgets.QLabel("🟢 정상 예측")
+            normal_label.setStyleSheet("font-weight: bold; color: #4caf50; margin-top: 5px;")
+            self.pred_filter_checkboxes_layout.addWidget(normal_label)
+
+            for choice in sorted(normal_preds):
+                checkbox = QtWidgets.QCheckBox(choice)
+                checkbox.toggled.connect(self.on_pred_filter_changed)
+                self.pred_filter_checkboxes[choice] = checkbox
+                self.pred_filter_checkboxes_layout.addWidget(checkbox)
+
+        if defect_preds:
+            # Defect predictions section
+            defect_label = QtWidgets.QLabel("🔴 결함 예측")
+            defect_label.setStyleSheet("font-weight: bold; color: #f44336; margin-top: 5px;")
+            self.pred_filter_checkboxes_layout.addWidget(defect_label)
+
+            for choice in sorted(defect_preds):
+                checkbox = QtWidgets.QCheckBox(choice)
+                checkbox.toggled.connect(self.on_pred_filter_changed)
+                self.pred_filter_checkboxes[choice] = checkbox
+                self.pred_filter_checkboxes_layout.addWidget(checkbox)
+
+        if unknown_preds:
+            # Unknown predictions section
+            unknown_label = QtWidgets.QLabel("⚪ 기타 예측")
+            unknown_label.setStyleSheet("font-weight: bold; color: #757575; margin-top: 5px;")
+            self.pred_filter_checkboxes_layout.addWidget(unknown_label)
+
+            for choice in sorted(unknown_preds):
+                checkbox = QtWidgets.QCheckBox(choice)
+                checkbox.toggled.connect(self.on_pred_filter_changed)
+                self.pred_filter_checkboxes[choice] = checkbox
+                self.pred_filter_checkboxes_layout.addWidget(checkbox)
+
+        # Add stretch at the end
+        self.pred_filter_checkboxes_layout.addStretch()
 
     def on_pred_filter_changed(self):
         """Handle pred filter checkbox changes"""
@@ -2914,14 +3261,17 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                             except:
                                 pass
                     
-                    # Create new backup
+                    # Create backup of original CSV (if not already exists)
                     backup_path = self.csv_path.replace('.csv', f'_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
                     if os.path.exists(self.csv_path):
                         import shutil
                         shutil.copy2(self.csv_path, backup_path)
-                    
-                    # Save to CSV with current labels
-                    self.df.to_csv(self.csv_path, index=False)
+
+                    # Save labeled data to new CSV file (not overwrite original)
+                    labeled_csv_path = self.csv_path.replace('.csv', f'_labeled_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
+                    self.df.to_csv(labeled_csv_path, index=False)
+                    print(f"✅ 라벨링 결과가 포함된 CSV 저장됨: {labeled_csv_path}")
+                    print(f"   원본 CSV 백업됨: {backup_path}")
                     self._update_save_status("저장 완료", "#4CAF50")
                     self.status.showMessage(f"데이터 저장 완료: {saved_count}개 항목 (JSON + CSV)", 1000)
                 except Exception as csv_error:
@@ -3312,6 +3662,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             self.cmb_label_value.currentText(),
             self.cmb_model_name.currentText(),
             self.cmb_result_filter.currentText(),
+            self.cmb_background_filter.currentText(),
             self.chk_bookmarks.isChecked(),
             tuple(sorted(self.selected_pred_filters))
         )
@@ -3359,7 +3710,24 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         result_value = self.cmb_result_filter.currentText()
         if result_value and result_value != "전체" and "Result" in self.df.columns:
             mask &= (self.df["Result"] == result_value)
-        
+
+        # Background_result filter
+        background_value = self.cmb_background_filter.currentText()
+        if background_value and background_value != "전체" and "Background_result" in self.df.columns:
+            mask &= (self.df["Background_result"] == background_value)
+
+        # Background_score quality filter
+        if "Background_score" in self.df.columns:
+            # High quality: >= 0.99
+            if background_value == "고품질배경":
+                mask &= (pd.to_numeric(self.df["Background_score"], errors='coerce') >= 0.99)
+            # Normal quality: >= 0.95
+            elif background_value == "일반배경":
+                mask &= (pd.to_numeric(self.df["Background_score"], errors='coerce') >= 0.95)
+            # Low quality: < 0.95
+            elif background_value == "저품질배경":
+                mask &= (pd.to_numeric(self.df["Background_score"], errors='coerce') < 0.95)
+
         # Unique_seg_result filter
         if self.selected_pred_filters and "Unique_seg_result" in self.df.columns:
             pred_mask = pd.Series([False] * len(self.df), index=self.df.index)
@@ -4123,9 +4491,16 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         visible_df = self.df.iloc[visible_indices]
         
         # Set up table - add model_name if available
-        display_cols = ["File_path", "Result", "Background_result", "Unique_seg_result", self.active_label_col]
+        base_cols = ["File_path", "Result", "Background_result", "Unique_seg_result"]
+        display_cols = base_cols.copy()
+
+        # Only add active_label_col if it's not already in the list (avoid duplicates)
+        if self.active_label_col not in display_cols:
+            display_cols.append(self.active_label_col)
+
         if "model_name" in visible_df.columns:
-            display_cols.insert(-1, "model_name")  # Insert before label column
+            # Insert before the last column (which should be the label column)
+            display_cols.insert(-1, "model_name")
         display_cols = [col for col in display_cols if col in visible_df.columns]
         
         try:
