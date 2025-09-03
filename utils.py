@@ -27,11 +27,6 @@ from create_excel_from_seg_csv import resolve_image_path
 
     # CSV 타입별 경로 설정
 CSV_CONFIGS = {
-    "inference": {
-        "csv_path": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/inference_results.csv",
-        "images_base": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/images",
-        "json_base": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/result"  # JSON 파일이 있는 기본 경로
-    },
     "report": {
         "csv_path": "/Users/yunamgyu/Downloads/report/2025-07-31.csv",
         "images_base": "/Users/yunamgyu/Downloads/report/images",  # report 폴더에 images 하위폴더가 있다고 가정
@@ -41,18 +36,13 @@ CSV_CONFIGS = {
 
 def detect_csv_type(csv_path: str) -> str:
     """CSV 파일 경로를 기반으로 타입을 감지합니다."""
-    if "inference" in csv_path.lower():
-        return "inference"
-    elif "report" in csv_path.lower():
-        return "report"
-    else:
-        # 기본값으로 inference 사용
-        return "inference"
+    # 모든 CSV 파일을 report 타입으로 처리
+    return "report"
 
 def get_csv_config(csv_path: str) -> dict:
     """CSV 파일 경로에 맞는 설정을 반환합니다."""
     csv_type = detect_csv_type(csv_path)
-    return CSV_CONFIGS.get(csv_type, CSV_CONFIGS["inference"])
+    return CSV_CONFIGS.get(csv_type, CSV_CONFIGS["report"])
 
 # Memory management utilities
 def get_memory_usage():

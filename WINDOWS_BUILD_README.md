@@ -1,5 +1,9 @@
 # Excel Image Labeler - Windows EXE 빌드 가이드
 
+## ✅ 빌드 상태
+- **macOS 앱**: ✅ 완료 (143MB)
+- **Windows EXE**: 🔄 Windows 환경에서 빌드 필요
+
 ## 📋 요구사항
 
 ### 필수 소프트웨어
@@ -17,20 +21,27 @@
 ### 방법 1: 배치 파일 사용 (가장 간단)
 ```batch
 # 1. 이 저장소를 클론 또는 다운로드
-# 2. build_windows.exe.bat 더블클릭
-# 3. 자동으로 빌드 진행
+# 2. build_windows_final.bat 더블클릭
+# 3. 자동으로 빌드 진행 (약 5-15분 소요)
 # 4. dist 폴더에 exe 파일 생성됨
 ```
 
 ### 방법 2: PowerShell 사용 (고급 옵션)
 ```powershell
 # 관리자 권한 PowerShell에서 실행
-.\build_windows.ps1
+.\build_windows_final.ps1
 
 # 옵션들:
-.\build_windows.ps1 -Clean        # 이전 빌드 정리
-.\build_windows.ps1 -Debug        # 디버그 모드
-.\build_windows.ps1 -NoOneFile    # 단일 파일이 아닌 폴더 형태로 빌드
+.\build_windows_final.ps1 -Clean        # 이전 빌드 정리
+.\build_windows_final.ps1 -Debug        # 디버그 모드 (콘솔 표시)
+.\build_windows_final.ps1 -NoOneFile    # 단일 파일 대신 폴더 형태로 빌드
+.\build_windows_final.ps1 -Force        # 강제 재빌드
+```
+
+### 방법 3: 간단 버전 (빠른 테스트용)
+```batch
+# 간단한 버전 사용 (고급 기능 없음)
+build_windows_simple.bat 더블클릭
 ```
 
 ## 🔧 수동 빌드

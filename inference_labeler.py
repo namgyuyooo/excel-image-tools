@@ -25,34 +25,106 @@ from openpyxl import load_workbook
 # Reuse path resolution from the existing module
 from create_excel_from_seg_csv import resolve_image_path
 
-    # CSV 타입별 경로 설정
+    # CSV 타입별 기본 템플릿 (동적 경로 생성용)
 CSV_CONFIGS = {
-    "inference": {
-        "csv_path": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/inference_results.csv",
-        "images_base": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/images",
-        "json_base": "/Users/yunamgyu/Downloads/v0.5/v0.5_inference_20250818_v0.2/result"  # JSON 파일이 있는 기본 경로
-    },
     "report": {
-        "csv_path": "/Users/yunamgyu/Downloads/report 2/2025-07-31.csv",
-        "images_base": "/Users/yunamgyu/Downloads/report 2/1-001",  # 실제 이미지 파일들이 있는 경로
-        "json_base": "/Users/yunamgyu/Downloads/report 2/result"  # JSON 파일이 있는 기본 경로
+        "csv_path": "",  # 동적으로 설정됨
+        "images_base": "",  # 동적으로 설정됨
+        "json_base": ""  # 동적으로 설정됨
     }
 }
 
+def auto_detect_paths(csv_path: str) -> dict:
+    """CSV 파일 경로를 기반으로 이미지와 JSON 경로를 자동 탐색합니다."""
+    import os
+    import glob
+
+    csv_dir = os.path.dirname(csv_path)
+    csv_name = os.path.basename(csv_path)
+    csv_base = os.path.splitext(csv_name)[0]
+
+    print(f"🔍 자동 경로 탐색 시작: {csv_path}")
+    print(f"📁 CSV 디렉토리: {csv_dir}")
+
+    # 가능한 이미지 경로 후보들
+    image_candidates = [
+        os.path.join(csv_dir, "images"),
+        os.path.join(csv_dir, "img"),
+        os.path.join(csv_dir, "1"),  # /1/ 구조
+        os.path.join(csv_dir, "1", "0001"),  # /1/0001/ 구조
+        os.path.join(csv_dir, "1", "0001", "Unit"),  # /1/0001/Unit/ 구조
+        os.path.join(csv_dir, "Unit"),  # Unit 폴더
+        csv_dir,  # CSV 파일과 같은 디렉토리
+    ]
+
+    # 가능한 JSON 경로 후보들
+    json_candidates = [
+        os.path.join(csv_dir, "json"),
+        os.path.join(csv_dir, "result"),
+        os.path.join(csv_dir, "Unit"),  # Unit 폴더
+        os.path.join(csv_dir, "1"),  # /1/ 구조
+        os.path.join(csv_dir, "1", "0001"),  # /1/0001/ 구조
+        csv_dir,  # CSV 파일과 같은 디렉토리
+    ]
+
+    # 이미지 경로 탐색
+    images_base = None
+    for candidate in image_candidates:
+        if os.path.exists(candidate):
+            # 이미지 파일이 있는지 확인
+            image_files = glob.glob(os.path.join(candidate, "**", "*.jpg"), recursive=True)
+            image_files.extend(glob.glob(os.path.join(candidate, "**", "*.png"), recursive=True))
+            image_files.extend(glob.glob(os.path.join(candidate, "**", "*.bmp"), recursive=True))
+
+            if image_files:
+                images_base = candidate
+                print(f"✅ 이미지 경로 발견: {candidate} ({len(image_files)}개 파일)")
+                break
+
+    # JSON 경로 탐색
+    json_base = None
+    for candidate in json_candidates:
+        if os.path.exists(candidate):
+            # JSON 파일이 있는지 확인
+            json_files = glob.glob(os.path.join(candidate, "**", "*.json"), recursive=True)
+
+            if json_files:
+                json_base = candidate
+                print(f"✅ JSON 경로 발견: {candidate} ({len(json_files)}개 파일)")
+                break
+
+    # 기본값 설정 (발견되지 않은 경우)
+    if not images_base:
+        images_base = csv_dir
+        print(f"⚠️ 이미지 경로를 찾을 수 없어 기본값 사용: {images_base}")
+
+    if not json_base:
+        json_base = csv_dir
+        print(f"⚠️ JSON 경로를 찾을 수 없어 기본값 사용: {json_base}")
+
+    return {
+        "csv_path": csv_path,
+        "images_base": images_base,
+        "json_base": json_base
+    }
+
 def detect_csv_type(csv_path: str) -> str:
     """CSV 파일 경로를 기반으로 타입을 감지합니다."""
-    if "inference" in csv_path.lower():
-        return "inference"
-    elif "report" in csv_path.lower():
-        return "report"
-    else:
-        # 기본값으로 inference 사용
-        return "inference"
+    # 모든 CSV 파일을 report 타입으로 처리
+    return "report"
 
 def get_csv_config(csv_path: str) -> dict:
     """CSV 파일 경로에 맞는 설정을 반환합니다."""
     csv_type = detect_csv_type(csv_path)
-    return CSV_CONFIGS.get(csv_type, CSV_CONFIGS["inference"])
+
+    # 동적 경로 탐색을 통해 설정 생성
+    if csv_path and os.path.exists(csv_path):
+        detected_config = auto_detect_paths(csv_path)
+        print(f"🎯 최종 설정: {detected_config}")
+        return detected_config
+    else:
+        # 기본 설정 반환
+        return CSV_CONFIGS.get(csv_type, CSV_CONFIGS["report"])
 
 # Memory management utilities
 def get_memory_usage():
@@ -106,6 +178,121 @@ def parse_pred_list(value) -> List[str]:
 
 
 
+
+
+def extract_bbox_from_json(json_path: str) -> List[dict]:
+    """JSON 파일에서 bbox 정보를 추출합니다."""
+    if not json_path or not os.path.exists(json_path):
+        return []
+
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        bboxes = []
+
+        # JSON이 리스트 형태인 경우 (주어진 예시처럼)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and 'bbox' in item:
+                    bbox = item['bbox']
+                    # 리스트 형태에서는 imageWidth/Height 정보가 없으므로 기본값 사용
+                    processed_bbox = process_bbox_coordinates(bbox)
+
+                    bbox_info = {
+                        'bbox': processed_bbox,  # 변환된 [x1, y1, x2, y2]
+                        'label': item.get('label', 'Unknown'),
+                        'score': item.get('score', 0.0),
+                        'type': item.get('type', 'unknown'),
+                        'original_bbox': bbox,  # 원본 bbox도 저장
+                        'json_img_width': None,
+                        'json_img_height': None
+                    }
+                    bboxes.append(bbox_info)
+
+        # JSON이 딕셔너리 형태인 경우
+        elif isinstance(data, dict):
+            # JSON에서 원본 이미지 크기 정보 추출
+            json_img_width = data.get('imageWidth', None)
+            json_img_height = data.get('imageHeight', None)
+            
+            # 어노테이션 정보에서 bbox 추출
+            if 'annotations' in data and isinstance(data['annotations'], list):
+                for ann in data['annotations']:
+                    if isinstance(ann, dict) and 'bbox' in ann:
+                        bbox = ann['bbox']
+                        # bbox 좌표 변환 (이미지 크기 정보 포함)
+                        processed_bbox = process_bbox_coordinates(bbox, json_img_width, json_img_height)
+
+                        bbox_info = {
+                            'bbox': processed_bbox,
+                            'label': ann.get('label', 'Unknown'),
+                            'score': ann.get('score', 0.0),
+                            'type': ann.get('type', 'unknown'),
+                            'original_bbox': bbox,  # 원본 bbox도 저장
+                            'json_img_width': json_img_width,
+                            'json_img_height': json_img_height
+                        }
+                        bboxes.append(bbox_info)
+
+        return bboxes
+
+    except Exception as e:
+        print(f"bbox 추출 중 오류: {e}")
+        return []
+
+
+def process_bbox_coordinates(bbox: list, json_img_width: int = None, json_img_height: int = None) -> list:
+    """bbox 좌표를 처리하여 올바른 포맷으로 변환합니다."""
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        print(f"⚠️ 잘못된 bbox 형식: {bbox}")
+        return bbox
+
+    x1, y1, x2, y2 = bbox
+
+    # 좌표 유효성 검사
+    if x1 >= x2 or y1 >= y2:
+        print(f"⚠️ bbox 좌표 순서 오류: {bbox}")
+        return bbox
+
+    # 정규화 좌표인지 확인 (0.0-1.0 범위)
+    is_normalized = all(0.0 <= coord <= 1.0 for coord in [x1, y1, x2, y2])
+
+    if is_normalized:
+        # 정규화 좌표를 절대 좌표로 변환
+        # JSON에 이미지 크기 정보가 있으면 사용, 없으면 기본값
+        img_width = json_img_width if json_img_width else 250
+        img_height = json_img_height if json_img_height else 250
+        
+        abs_x1 = int(x1 * img_width)
+        abs_y1 = int(y1 * img_height)
+        abs_x2 = int(x2 * img_width)
+        abs_y2 = int(y2 * img_height)
+
+        print(f"🔄 정규화→절대 변환 ({img_width}x{img_height}): [{x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}] → [{abs_x1}, {abs_y1}, {abs_x2}, {abs_y2}]")
+        return [abs_x1, abs_y1, abs_x2, abs_y2]
+    else:
+        # 절대 좌표인 경우 - JSON 이미지 크기 정보가 있으면 로그에 표시
+        if json_img_width and json_img_height:
+            print(f"✅ 절대 좌표 확인 (JSON: {json_img_width}x{json_img_height}): [{x1}, {y1}, {x2}, {y2}]")
+        else:
+            print(f"✅ 절대 좌표 확인: [{x1}, {y1}, {x2}, {y2}]")
+        return bbox
+
+
+def generate_label_color(label: str) -> QtGui.QColor:
+    """label을 기반으로 유니크한 색상을 생성합니다."""
+    # label을 해시해서 일관된 색상 생성
+    hash_value = hash(label) % 360  # 0-359 범위
+
+    # HSL에서 색상 생성 (채도는 높게, 밝기는 중간으로)
+    hue = hash_value
+    saturation = 200  # 높은 채도
+    lightness = 150   # 중간 밝기
+
+    color = QtGui.QColor()
+    color.setHsl(hue, saturation, lightness)
+    return color
 
 
 def extract_detail_from_json(json_path: str) -> List[str]:
@@ -351,7 +538,7 @@ class SetupWindow(QtWidgets.QDialog):
         self.csv_path = ""
         self.images_base = ""
         self.json_base = ""
-        self.csv_type = "inference"
+        self.csv_type = "report"
         
         self._build_ui()
         self._load_default_paths()
@@ -412,7 +599,7 @@ class SetupWindow(QtWidgets.QDialog):
         labeling_layout.addWidget(self.skip_existing_labels_chk)
 
         layout.addWidget(labeling_group)
-
+        
         # 이미지 폴더 선택
         images_group = QtWidgets.QGroupBox("이미지 폴더 선택")
         images_layout = QtWidgets.QVBoxLayout(images_group)
@@ -453,25 +640,19 @@ class SetupWindow(QtWidgets.QDialog):
         json_layout.addLayout(json_path_layout)
         layout.addWidget(json_group)
         
-        # CSV 타입 선택
-        type_group = QtWidgets.QGroupBox("CSV 타입 선택")
+        # CSV 타입 선택 (리포트 단일로 고정)
+        type_group = QtWidgets.QGroupBox("CSV 타입 설정")
         type_layout = QtWidgets.QVBoxLayout(type_group)
         
-        type_info = QtWidgets.QLabel("CSV 파일의 타입을 선택하면 자동으로 기본 경로가 설정됩니다.")
+        type_info = QtWidgets.QLabel("CSV 타입: 리포트 단일 (Report Single)")
+        type_info.setStyleSheet("font-weight: bold; color: #1976d2;")
         type_layout.addWidget(type_info)
         
-        type_buttons_layout = QtWidgets.QHBoxLayout()
-        
-        self.inference_radio = QtWidgets.QRadioButton("Inference Results")
-        self.inference_radio.setChecked(True)
-        self.inference_radio.toggled.connect(self._on_type_changed)
-        type_buttons_layout.addWidget(self.inference_radio)
-        
-        self.report_radio = QtWidgets.QRadioButton("Report")
-        self.report_radio.toggled.connect(self._on_type_changed)
-        type_buttons_layout.addWidget(self.report_radio)
-        
-        type_layout.addLayout(type_buttons_layout)
+        # 고정된 타입 표시
+        type_display = QtWidgets.QLabel("📊 리포트 CSV 파일을 사용합니다.")
+        type_display.setStyleSheet("color: #666; font-style: italic;")
+        type_layout.addWidget(type_display)
+
         layout.addWidget(type_group)
 
         # 마지막 경로 설정 복원 버튼
@@ -526,11 +707,11 @@ class SetupWindow(QtWidgets.QDialog):
     
     def _load_default_paths(self):
         """기본 경로 로드"""
-        # inference 타입이 기본값
-        self.csv_type = "inference"
-        self.csv_path = CSV_CONFIGS["inference"]["csv_path"]
-        self.images_base = CSV_CONFIGS["inference"]["images_base"]
-        self.json_base = CSV_CONFIGS["inference"]["json_base"]
+        # 리포트 단일 타입이 기본값
+        self.csv_type = "report"
+        self.csv_path = CSV_CONFIGS["report"]["csv_path"]
+        self.images_base = CSV_CONFIGS["report"]["images_base"]
+        self.json_base = CSV_CONFIGS["report"]["json_base"]
 
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
@@ -547,12 +728,6 @@ class SetupWindow(QtWidgets.QDialog):
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
         self.json_path_edit.setText(self.json_base)
-        
-        # CSV 타입에 맞게 라디오 버튼 설정
-        if self.csv_type == "inference":
-            self.inference_radio.setChecked(True)
-        else:
-            self.report_radio.setChecked(True)
             
         self._update_test_button_state()
         print("저장된 경로 설정이 복원되었습니다.")
@@ -581,23 +756,7 @@ class SetupWindow(QtWidgets.QDialog):
            self.json_base != CSV_CONFIGS[self.csv_type]["json_base"]:
             print("저장된 경로 설정이 복원되었습니다.")
     
-    def _on_type_changed(self):
-        """CSV 타입 변경 시 처리"""
-        if self.inference_radio.isChecked():
-            self.csv_type = "inference"
-        else:
-            self.csv_type = "report"
 
-        # 타입에 따라 기본 경로 설정
-        self.csv_path = CSV_CONFIGS[self.csv_type]["csv_path"]
-        self.images_base = CSV_CONFIGS[self.csv_type]["images_base"]
-        self.json_base = CSV_CONFIGS[self.csv_type]["json_base"]
-
-        self.csv_path_edit.setText(self.csv_path)
-        self.images_path_edit.setText(self.images_base)
-        self.json_path_edit.setText(self.json_base)
-
-        self._update_test_button_state()
     
     def _browse_csv(self):
         """CSV 파일 찾기"""
@@ -612,13 +771,7 @@ class SetupWindow(QtWidgets.QDialog):
             self.csv_path = file_path
             self.csv_path_edit.setText(file_path)
             
-            # 파일명을 기반으로 타입 자동 감지
-            detected_type = detect_csv_type(file_path)
-            if detected_type == "inference":
-                self.inference_radio.setChecked(True)
-            elif detected_type == "report":
-                self.report_radio.setChecked(True)
-            
+            # 리포트 단일 타입으로 고정되어 있으므로 별도 처리 불필요
             self._update_test_button_state()
     
     def _browse_images(self):
@@ -679,12 +832,14 @@ class SetupWindow(QtWidgets.QDialog):
                 self.test_result_label.setText("❌ CSV 파일에 'File_path' 컬럼이 없습니다.")
                 return
             
-            # 이미지 매칭 테스트 (최대 10개만 테스트)
+            # 이미지 및 JSON 매칭 테스트 (최대 10개만 테스트)
             total_rows = len(df)
             test_count = min(10, total_rows)  # 최대 10개만 테스트
-            matched_count = 0
-            sample_matches = []
-            print(f"🔍 이미지 매칭 테스트 시작: {test_count}개 행 검사 (총 {total_rows}개 중)")
+            image_matched_count = 0
+            json_matched_count = 0
+            sample_image_matches = []
+            sample_json_matches = []
+            print(f"🔍 매칭 테스트 시작: {test_count}개 행 검사 (총 {total_rows}개 중)")
 
             for idx in range(test_count):
                 row = df.iloc[idx]
@@ -692,26 +847,183 @@ class SetupWindow(QtWidgets.QDialog):
                 if pd.isna(file_path) or not str(file_path).strip():
                     continue
 
-                print(f"🔎 파일 검색: {file_path}")
+                print(f"🔎 행 {idx} 검사: {os.path.basename(file_path)}")
+
+                # 1. 이미지 파일 매칭 테스트
                 resolved_path = resolve_image_path(self.images_base, str(file_path))
                 if resolved_path and os.path.exists(resolved_path):
-                    matched_count += 1
-                    print(f"✅ 이미지 찾음: {os.path.basename(resolved_path)}")
-                    if len(sample_matches) < 3:
-                        sample_matches.append(os.path.basename(resolved_path))
+                    image_matched_count += 1
+                    print(f"  ✅ 이미지: {os.path.basename(resolved_path)}")
+                    if len(sample_image_matches) < 2:
+                        sample_image_matches.append(os.path.basename(resolved_path))
                 else:
-                    print(f"❌ 이미지 못 찾음: {file_path}")
+                    print(f"  ❌ 이미지: 찾을 수 없음")
 
-            print(f"📈 매칭 결과: {matched_count}/{test_count}개 이미지 찾음")
+                # 2. JSON 파일 매칭 테스트 (개선된 알고리즘)
+                json_found = False
+                if self.json_base:
+                    # File_path에서 파일명 추출
+                    filename = os.path.basename(file_path)
+                    name_without_ext = os.path.splitext(filename)[0]
+
+                    print(f"  🔍 JSON 검색: {filename} -> {name_without_ext}.json")
+
+                    # 개선된 JSON 검색 패턴들
+                    json_candidates = []
+
+                    # 기본 패턴들
+                    json_candidates.extend([
+                        os.path.join(self.json_base, name_without_ext + '.json'),
+                        os.path.join(self.json_base, filename + '.json'),
+                        os.path.join(self.json_base, filename),
+                        os.path.join(self.json_base, name_without_ext, name_without_ext + '.json'),
+                    ])
+
+                    # 초유연 구조 기반 JSON 검색
+                    import re
+
+                    # CSV File_path 구조 분석
+                    csv_number_pattern = re.search(r'/(\d+)/', file_path)
+                    csv_structure = {}
+
+                    if csv_number_pattern:
+                        csv_number = csv_number_pattern.group(1)
+                        csv_structure['number'] = csv_number
+
+                        # /숫자/ 이후 경로 분석
+                        after_number = file_path.split(f'/{csv_number}/', 1)[1]
+                        path_parts = after_number.split('/')
+
+                        if len(path_parts) >= 4:
+                            csv_structure.update({
+                                'part1': path_parts[0],  # 0001
+                                'part2': path_parts[1],  # Unit
+                                'part3': path_parts[2],  # U12, U70 등
+                                'part4': path_parts[3],  # BC, FC 등
+                            })
+
+                    # JSON 기본 경로 구조 분석
+                    base_number_pattern = re.search(r'/test/(\d+)/', self.json_base)
+                    base_structure = {}
+
+                    if base_number_pattern:
+                        base_number = base_number_pattern.group(1)
+                        base_structure['number'] = base_number
+
+                        # 기본 경로의 나머지 부분 분석
+                        after_base_number = self.json_base.split(f'/test/{base_number}/', 1)[1]
+                        base_path_parts = after_base_number.split('/')
+
+                        if len(base_path_parts) >= 4:
+                            base_structure.update({
+                                'part1': base_path_parts[0],
+                                'part2': base_path_parts[1],
+                                'part3': base_path_parts[2],
+                                'part4': base_path_parts[3],
+                            })
+
+                    # 구조 기반 JSON 패턴 생성
+                    if csv_structure and base_structure:
+                        # 다양한 Unit 폴더 조합 생성
+                        unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
+                        type_folders = ['BC', 'FC', 'DC']
+
+                        for unit in unit_folders:
+                            for type_folder in type_folders:
+                                # JSON 구조 기반 경로 생성
+                                json_struct_path = f"{base_number}/{base_structure.get('part2', 'Unit')}/{unit}/{type_folder}/{name_without_ext}.json"
+                                json_candidates.append(os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", json_struct_path))
+
+                                # /Unit 폴더에서도
+                                unit_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "Unit", f"{name_without_ext}.json")
+                                json_candidates.append(unit_base)
+
+                                # /img 폴더에서도
+                                img_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "img", json_struct_path)
+                                json_candidates.append(img_base)
+
+                    # 기존 방식도 유지 (폴백)
+                    number_pattern_in_base = re.search(r'/test/(\d+)/', self.json_base)
+                    if number_pattern_in_base:
+                        number_part = number_pattern_in_base.group(1)
+                        unit_base = self.json_base.replace(f'/test/{number_part}/', '/test/Unit/')
+                        json_candidates.extend([
+                            os.path.join(unit_base, name_without_ext + '.json'),
+                            os.path.join(unit_base, filename),
+                        ])
+
+                    # Unit 폴더 간 검색 (U0 -> U9, U12 등)
+                    if '/Unit/' in self.json_base:
+                        # Unit 폴더 목록
+                        unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
+
+                        for unit_folder in unit_folders:
+                            # 기본 Unit 경로에서
+                            unit_path = self.json_base.replace('/Unit/U0/', f'/Unit/{unit_folder}/')
+                            json_candidates.extend([
+                                os.path.join(unit_path, name_without_ext + '.json'),
+                                os.path.join(unit_path, filename),
+                            ])
+
+                            # /img Unit 경로에서도
+                            if number_pattern_in_base:
+                                number_part = number_pattern_in_base.group(1)
+                                img_unit_path = self.json_base.replace(f'/test/{number_part}/', '/test/img/1/').replace('/Unit/U0/', f'/Unit/{unit_folder}/')
+                                json_candidates.extend([
+                                    os.path.join(img_unit_path, name_without_ext + '.json'),
+                                    os.path.join(img_unit_path, filename),
+                                ])
+
+                        # 기존 Unit 기반 폴백
+                        unit_parent = os.path.dirname(self.json_base)
+                        json_candidates.extend([
+                            os.path.join(unit_parent, "**", name_without_ext + '.json'),
+                            os.path.join(unit_parent, "**", filename),
+                        ])
+
+                    # 모든 후보 경로에서 검색
+                    for candidate in json_candidates:
+                        if os.path.exists(candidate):
+                            json_matched_count += 1
+                            print(f"  ✅ JSON: {os.path.basename(candidate)} (경로: {os.path.dirname(candidate)})")
+                            if len(sample_json_matches) < 2:
+                                sample_json_matches.append(os.path.basename(candidate))
+                            json_found = True
+                            break
+
+                        # glob 패턴으로 검색 (디렉토리인 경우)
+                        if os.path.isdir(os.path.dirname(candidate)):
+                            import glob
+                            pattern = os.path.join(os.path.dirname(candidate), "**", os.path.basename(candidate))
+                            matches = glob.glob(pattern, recursive=True)
+                            if matches:
+                                json_matched_count += 1
+                                found_path = matches[0]
+                                print(f"  ✅ JSON: {os.path.basename(found_path)} (재귀 검색)")
+                                if len(sample_json_matches) < 2:
+                                    sample_json_matches.append(os.path.basename(found_path))
+                                json_found = True
+                                break
+
+                    if not json_found:
+                        print(f"  ❌ JSON: 찾을 수 없음 (기본경로: {self.json_base})")
+                else:
+                    print(f"  ⚠️ JSON 경로 설정 안됨")
+
+            print(f"📈 매칭 결과:")
+            print(f"   이미지: {image_matched_count}/{test_count}개 찾음")
+            print(f"   JSON: {json_matched_count}/{test_count}개 찾음")
             
-            # 결과 표시
-            match_rate = (matched_count / test_count * 100) if test_count > 0 else 0
-            
-            if match_rate > 80:
+            # 결과 표시 (이미지와 JSON 모두 고려)
+            image_match_rate = (image_matched_count / test_count * 100) if test_count > 0 else 0
+            json_match_rate = (json_matched_count / test_count * 100) if test_count > 0 else 0
+            overall_match_rate = ((image_matched_count + json_matched_count) / (test_count * 2) * 100) if test_count > 0 else 0
+
+            if overall_match_rate > 75:
                 status = "✅"
                 color = "green"
                 self.start_btn.setEnabled(True)
-            elif match_rate > 50:
+            elif overall_match_rate > 40:
                 status = "⚠️"
                 color = "orange"
                 self.start_btn.setEnabled(True)
@@ -721,14 +1033,25 @@ class SetupWindow(QtWidgets.QDialog):
                 self.start_btn.setEnabled(False)
             
             result_text = f"{status} 매칭 테스트 결과:\n"
-            result_text += f"테스트 행: {test_count:,}개 (전체: {total_rows:,}개)\n"
-            result_text += f"매칭 성공: {matched_count:,}개\n"
-            result_text += f"매칭률: {match_rate:.1f}%\n\n"
-            
-            if sample_matches:
-                result_text += f"샘플 매칭 파일:\n"
-                for match in sample_matches:
-                    result_text += f"  • {match}\n"
+            result_text += f"전체 행: {total_rows:,}개\n"
+            result_text += f"테스트 행: {test_count}개\n"
+            result_text += f"이미지 매칭: {image_matched_count}/{test_count} ({image_match_rate:.1f}%)\n"
+            result_text += f"JSON 매칭: {json_matched_count}/{test_count} ({json_match_rate:.1f}%)\n"
+            result_text += f"종합 매칭률: {overall_match_rate:.1f}%\n\n"
+
+            if sample_image_matches:
+                result_text += f"샘플 이미지 파일:\n"
+                for match in sample_image_matches:
+                    result_text += f"  📷 {match}\n"
+
+            if sample_json_matches:
+                result_text += f"샘플 JSON 파일:\n"
+                for match in sample_json_matches:
+                    result_text += f"  📄 {match}\n"
+
+            # bbox 정보도 표시 (JSON이 있는 경우)
+            if sample_json_matches and json_matched_count > 0:
+                result_text += f"\n💡 JSON 파일이 있으면 bbox 오버레이 표시 가능"
             
             self.test_result_label.setText(result_text)
             self.test_result_label.setStyleSheet(f"color: {color}; font-weight: bold;")
@@ -762,7 +1085,7 @@ class SetupWindow(QtWidgets.QDialog):
         last_csv_path = settings.value("last_csv_path", "")
         last_images_base = settings.value("last_images_base", "")
         last_json_base = settings.value("last_json_base", "")
-        last_csv_type = settings.value("last_csv_type", "inference")
+        last_csv_type = settings.value("last_csv_type", "report")
         
         if last_csv_path and os.path.exists(last_csv_path):
             self.csv_path = last_csv_path
@@ -770,7 +1093,7 @@ class SetupWindow(QtWidgets.QDialog):
             self.images_base = last_images_base
         if last_json_base and os.path.exists(last_json_base):
             self.json_base = last_json_base
-        if last_csv_type in ["inference", "report"]:
+        if last_csv_type == "report":
             self.csv_type = last_csv_type
             
         print(f"저장된 경로 설정 로드됨: CSV={self.csv_path}, 이미지={self.images_base}, JSON={self.json_base}")
@@ -805,17 +1128,17 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
         # 설정에서 경로 가져오기
         if settings:
-            self.csv_path = settings.get("csv_path", CSV_CONFIGS["inference"]["csv_path"])
-            self.images_base = settings.get("images_base", CSV_CONFIGS["inference"]["images_base"])
-            self.json_base = settings.get("json_base", CSV_CONFIGS["inference"]["json_base"])
-            csv_type = settings.get("csv_type", "inference")
+            self.csv_path = settings.get("csv_path", CSV_CONFIGS["report"]["csv_path"])
+            self.images_base = settings.get("images_base", CSV_CONFIGS["report"]["images_base"])
+            self.json_base = settings.get("json_base", CSV_CONFIGS["report"]["json_base"])
+            csv_type = settings.get("csv_type", "report")
             self.skip_existing_labels = settings.get("skip_existing_labels", False)
             self.setWindowTitle(f"추론 결과 라벨링 도구 - {csv_type.upper()} ({os.path.basename(self.csv_path)})")
         else:
             # 기본값 사용
-            self.csv_path = CSV_CONFIGS["inference"]["csv_path"]
-            self.images_base = CSV_CONFIGS["inference"]["images_base"]
-            self.json_base = CSV_CONFIGS["inference"]["json_base"]
+            self.csv_path = CSV_CONFIGS["report"]["csv_path"]
+            self.images_base = CSV_CONFIGS["report"]["images_base"]
+            self.json_base = CSV_CONFIGS["report"]["json_base"]
             self.skip_existing_labels = False
         
         # State
@@ -1186,6 +1509,12 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         """)
         self.btn_apply_filters.clicked.connect(self.apply_filters)
         fl.addWidget(self.btn_apply_filters, 5, 0, 1, 2)  # 2열에 걸쳐 표시
+        
+        # 필터 새로고침 버튼 추가
+        self.btn_refresh_filters = QtWidgets.QPushButton("🔄 필터 새로고침")
+        self.btn_refresh_filters.setToolTip("CSV 데이터에서 필터 옵션을 다시 로드합니다")
+        self.btn_refresh_filters.clicked.connect(self._refresh_basic_filters)
+        fl.addWidget(self.btn_refresh_filters, 6, 0, 1, 2)
 
         self.chk_show_overlay = QtWidgets.QCheckBox("JSON 오버레이 표시")
         self.chk_show_overlay.setChecked(self.show_overlay)
@@ -1355,12 +1684,20 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def _on_overlay_toggled(self, checked: bool):
         """오버레이 표시 토글"""
+        print(f"🔄 오버레이 토글: {'켜짐' if checked else '꺼짐'}")
         self.show_overlay = checked
+
         # 현재 표시된 이미지가 있다면 다시 로드하여 오버레이 적용/해제
         if hasattr(self, 'current_idx') and self.df is not None:
             if self.current_idx < len(self.filtered_indices):
                 row_idx = self.filtered_indices[self.current_idx]
+                print(f"📸 이미지 다시 로드 중... (행: {row_idx})")
                 self._load_image_for_row(row_idx)
+                print("✅ 이미지 다시 로드 완료")
+            else:
+                print("⚠️ 유효한 이미지 인덱스가 없음")
+        else:
+            print("⚠️ 현재 인덱스나 데이터프레임이 없음")
 
     def _create_status_widgets(self) -> None:
         """Create status bar widgets for real-time information display"""
@@ -1540,7 +1877,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         quick_filters = [
             ("라벨없음", self._filter_unlabeled, "#ff9800"),
             ("OK만", self._filter_ok_only, "#4caf50"),
-            ("NG만", self._filter_ng_only, "#f44336"),
+            ("NG만", self._filter_ng_only, "#f44336"), 
             ("배경SR", self._filter_sr_background, "#2196f3"),
             ("북마크", self._filter_bookmarks, "#9c27b0"),
             ("전체보기", self._show_all, "#757575")
@@ -1855,8 +2192,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 print(f"✅ 기존 '{self.active_label_col}' 컬럼을 제거했습니다.")
 
             # Create fresh Manual_Label column for user labeling
-            self.df[self.active_label_col] = ""
-            ensure_object_dtype(self.df, self.active_label_col)
+                self.df[self.active_label_col] = ""
+                ensure_object_dtype(self.df, self.active_label_col)
             print(f"✅ 새로운 빈 '{self.active_label_col}' 컬럼을 생성했습니다.")
             print("   이 컬럼은 사용자가 직접 라벨링한 결과를 저장합니다.")
 
@@ -2006,12 +2343,11 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def setup_result_filter(self) -> None:
         """Set up Result filter dropdown"""
-        self.cmb_result_filter = self.findChild(QtWidgets.QComboBox, "cmb_result_filter")
-        if not self.cmb_result_filter:
-            # If not found, create it in the basic filters section
-            self.cmb_result_filter = QtWidgets.QComboBox()
-            self.cmb_result_filter.setObjectName("cmb_result_filter")
+        if not hasattr(self, 'cmb_result_filter') or self.cmb_result_filter is None:
+            print("⚠️ cmb_result_filter가 생성되지 않음")
+            return
 
+        print(f"🔄 Result 필터 설정 시작...")
         self.cmb_result_filter.clear()
         self.cmb_result_filter.addItem("전체")
 
@@ -2019,19 +2355,24 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             print("ℹ️ Result 컬럼이 없음")
             return
 
-        # Get unique Result values
-        unique_results = sorted(self.df["Result"].dropna().unique())
-        self.cmb_result_filter.addItems(unique_results)
-        print(f"✅ Result 필터 설정됨: {len(unique_results)}개 값")
+        # Get unique Result values, filtering out NaN and empty strings
+        result_series = self.df["Result"].dropna()
+        result_series = result_series[result_series.astype(str).str.strip() != ""]
+        unique_results = sorted(result_series.unique())
+        
+        if unique_results:
+            self.cmb_result_filter.addItems([str(x) for x in unique_results])
+            print(f"✅ Result 필터 설정됨: {len(unique_results)}개 값 - {unique_results}")
+        else:
+            print("⚠️ Result 컬럼에 유효한 데이터 없음")
 
     def setup_background_filter(self) -> None:
         """Set up Background_result filter dropdown"""
-        self.cmb_background_filter = self.findChild(QtWidgets.QComboBox, "cmb_background_filter")
-        if not self.cmb_background_filter:
-            # If not found, create it in the basic filters section
-            self.cmb_background_filter = QtWidgets.QComboBox()
-            self.cmb_background_filter.setObjectName("cmb_background_filter")
+        if not hasattr(self, 'cmb_background_filter') or self.cmb_background_filter is None:
+            print("⚠️ cmb_background_filter가 생성되지 않음")
+            return
 
+        print(f"🔄 Background_result 필터 설정 시작...")
         self.cmb_background_filter.clear()
         self.cmb_background_filter.addItem("전체")
 
@@ -2039,10 +2380,16 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             print("ℹ️ Background_result 컬럼이 없음")
             return
 
-        # Add actual Background_result values from CSV
-        unique_bg_results = sorted(self.df["Background_result"].dropna().unique())
-        self.cmb_background_filter.addItems(unique_bg_results)
-        print(f"✅ Background_result 필터 설정됨: {len(unique_bg_results)}개 값")
+        # Get unique Background_result values, filtering out NaN and empty strings
+        bg_series = self.df["Background_result"].dropna()
+        bg_series = bg_series[bg_series.astype(str).str.strip() != ""]
+        unique_bg_results = sorted(bg_series.unique())
+        
+        if unique_bg_results:
+            self.cmb_background_filter.addItems([str(x) for x in unique_bg_results])
+            print(f"✅ Background_result 필터 설정됨: {len(unique_bg_results)}개 값 - {unique_bg_results}")
+        else:
+            print("⚠️ Background_result 컬럼에 유효한 데이터 없음")
 
     def _refresh_basic_filters(self) -> None:
         """Refresh all basic filter dropdowns to ensure they display properly"""
@@ -2064,9 +2411,11 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                     print(f"✅ 라벨 값 필터 설정됨: {len(unique_labels)}개 값")
 
             # Refresh result filter
+            print("🔄 Result 필터 새로고침 중...")
             self.setup_result_filter()
 
-            # Refresh background filter
+            # Refresh background filter  
+            print("🔄 Background_result 필터 새로고침 중...")
             self.setup_background_filter()
 
             # Ensure UI updates
@@ -2096,7 +2445,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
         
         self.pred_filter_checkboxes.clear()
-
+        
         # Create checkboxes for each unique prediction value (no categorization)
         for choice in sorted(self.pred_filter_choices):
             checkbox = QtWidgets.QCheckBox(choice)
@@ -2236,7 +2585,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         
         if not pred_list:
             lbl = QtWidgets.QLabel("AS-IS 매핑용 예측 데이터 없음")
-            self.as_is_tobe_layout.addWidget(lbl, 0, 0, 1, 2)
+            self.as_is_tobe_layout.addWidget(lbl)
             return
         
         # Create AS-IS → TO-BE mappings
@@ -3050,7 +3399,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                     if os.path.exists(self.csv_path):
                         import shutil
                         shutil.copy2(self.csv_path, backup_path)
-
+                    
                     # Save labeled data to new CSV file (not overwrite original)
                     labeled_csv_path = self.csv_path.replace('.csv', f'_labeled_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv')
                     self.df.to_csv(labeled_csv_path, index=False)
@@ -3465,7 +3814,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             return
 
         print(f"📝 데이터프레임 크기: {len(self.df)} 행")
-
+        
         # 버튼 비활성화로 사용자 피드백 제공
         if hasattr(self, 'btn_apply_filters'):
             self.btn_apply_filters.setEnabled(False)
@@ -3478,17 +3827,17 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 self.filtered_indices = self.df[self._filter_cache].index.tolist()
                 self._update_filter_results()
                 return
-
-                        # Start with all rows
+                
+            # Start with all rows
             mask = pd.Series([True] * len(self.df), index=self.df.index)
-
+            
             # Label state filter
             label_state = self.cmb_label_state.currentText()
             if label_state == "라벨됨":
                 mask &= ~(self.df[self.active_label_col].isna() | (self.df[self.active_label_col] == ""))
             elif label_state == "라벨안됨":
                 mask &= (self.df[self.active_label_col].isna() | (self.df[self.active_label_col] == ""))
-
+            
             # Label value filter
             label_value = self.cmb_label_value.currentText()
             if label_value and label_value != "전체":
@@ -3496,14 +3845,22 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
             # Result filter
             result_value = self.cmb_result_filter.currentText()
+            print(f"🔍 Result 필터: '{result_value}' (컬럼 존재: {'Result' in self.df.columns})")
             if result_value and result_value != "전체" and "Result" in self.df.columns:
+                before_count = mask.sum()
                 mask &= (self.df["Result"] == result_value)
-
+                after_count = mask.sum()
+                print(f"   Result 필터 적용: {before_count} → {after_count} 개 행")
+            
             # Background_result filter (use actual values from CSV)
             background_value = self.cmb_background_filter.currentText()
+            print(f"🖼️ Background_result 필터: '{background_value}' (컬럼 존재: {'Background_result' in self.df.columns})")
             if background_value and background_value != "전체" and "Background_result" in self.df.columns:
+                before_count = mask.sum()
                 mask &= (self.df["Background_result"] == background_value)
-
+                after_count = mask.sum()
+                print(f"   Background_result 필터 적용: {before_count} → {after_count} 개 행")
+            
             # Unique_seg_result filter
             if self.selected_pred_filters and "Unique_seg_result" in self.df.columns:
                 pred_mask = pd.Series([False] * len(self.df), index=self.df.index)
@@ -3512,18 +3869,18 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                     if any(pred_val in self.selected_pred_filters for pred_val in pred_list):
                         pred_mask.at[idx] = True
                 mask &= pred_mask
-
+            
             # Bookmarks filter
             if self.chk_bookmarks.isChecked():
                 store = load_label_store(self.json_path)
                 bookmarked_rows = [int(k) for k, v in store.get("labels", {}).items() if v.get("bookmark", False)]
                 mask &= self.df.index.isin(bookmarked_rows)
-
+            
             # Cache filter results and update indices
             self._filter_cache = mask
             self._last_filter_hash = current_filter_hash
             self.filtered_indices = self.df[mask].index.tolist()
-
+            
             self._update_filter_results()
 
         except Exception as e:
@@ -3544,11 +3901,11 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
         print("📊 _update_filter_results 호출됨")
         print(f"🔍 필터된 인덱스 수: {len(self.filtered_indices) if hasattr(self, 'filtered_indices') else 'None'}")
-
+        
         # Ensure current index is valid
         if self.current_idx >= len(self.filtered_indices):
             self.current_idx = max(0, len(self.filtered_indices) - 1)
-
+        
         try:
             # Update UI efficiently with forced refresh
             print("🖼️ refresh_view 호출 시작")
@@ -3559,13 +3916,13 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             print("📋 테이블 갱신 시작")
             self.refresh_table()
             print("✅ 테이블 갱신 완료")
-
+            
             # Update progress dashboard
             self._update_progress_dashboard()
-
+            
             # Force UI update
             QtWidgets.QApplication.processEvents()
-
+            
             # Show filter status with more details
             total_items = len(self.df) if self.df is not None else 0
             if len(self.filtered_indices) > 0:
@@ -3640,7 +3997,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             'result': '',
             'has_overlay': False,
             'annotations': [],  # 런랭스 마스크 정보 추가
-            'image_size': None
+            'image_size': None,
+            'bboxes': []  # bbox 정보 추가
         }
 
         try:
@@ -3662,7 +4020,154 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                         if not os.path.exists(json_file_path):
                             json_file_path = None
 
-                    # 2. JSON 기본 경로와 결합하여 찾기
+                    # 2. JSON 기본 경로에서 파일명으로 찾기 (개선된 알고리즘)
+                    if json_file_path is None and self.json_base:
+                        # File_path에서 파일명만 추출
+                        if "File_path" in self.df.columns:
+                            file_path = str(self.df.at[row_idx, "File_path"])
+                            filename = os.path.basename(file_path)
+                            name_without_ext = os.path.splitext(filename)[0]
+
+                            print(f"🔍 JSON 검색 시작: {filename} -> {name_without_ext}.json")
+
+                            # 개선된 JSON 후보 경로들
+                            json_candidates = []
+
+                            # 기본 패턴들
+                            json_candidates.extend([
+                                os.path.join(self.json_base, name_without_ext + '.json'),
+                                os.path.join(self.json_base, filename + '.json'),
+                                os.path.join(self.json_base, filename),
+                                os.path.join(self.json_base, name_without_ext, name_without_ext + '.json'),
+                            ])
+
+                            # 초유연 구조 기반 오버레이 JSON 검색
+                            import re
+
+                            # CSV File_path 구조 분석
+                            csv_number_pattern = re.search(r'/(\d+)/', file_path)
+                            csv_structure = {}
+
+                            if csv_number_pattern:
+                                csv_number = csv_number_pattern.group(1)
+                                csv_structure['number'] = csv_number
+
+                                # /숫자/ 이후 경로 분석
+                                after_number = file_path.split(f'/{csv_number}/', 1)[1]
+                                path_parts = after_number.split('/')
+
+                                if len(path_parts) >= 4:
+                                    csv_structure.update({
+                                        'part1': path_parts[0],  # 0001
+                                        'part2': path_parts[1],  # Unit
+                                        'part3': path_parts[2],  # U12, U70 등
+                                        'part4': path_parts[3],  # BC, FC 등
+                                    })
+
+                            # JSON 기본 경로 구조 분석
+                            base_number_pattern = re.search(r'/test/(\d+)/', self.json_base)
+                            base_structure = {}
+
+                            if base_number_pattern:
+                                base_number = base_number_pattern.group(1)
+                                base_structure['number'] = base_number
+
+                                # 기본 경로의 나머지 부분 분석
+                                after_base_number = self.json_base.split(f'/test/{base_number}/', 1)[1]
+                                base_path_parts = after_base_number.split('/')
+
+                                if len(base_path_parts) >= 4:
+                                    base_structure.update({
+                                        'part1': base_path_parts[0],
+                                        'part2': base_path_parts[1],
+                                        'part3': base_path_parts[2],
+                                        'part4': base_path_parts[3],
+                                    })
+
+                            # 구조 기반 JSON 패턴 생성
+                            if csv_structure and base_structure:
+                                # 다양한 Unit 폴더 조합 생성
+                                unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
+                                type_folders = ['BC', 'FC', 'DC']
+
+                                for unit in unit_folders:
+                                    for type_folder in type_folders:
+                                        # JSON 구조 기반 경로 생성
+                                        json_struct_path = f"{base_number}/{base_structure.get('part2', 'Unit')}/{unit}/{type_folder}/{name_without_ext}.json"
+                                        json_candidates.append(os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", json_struct_path))
+
+                                        # /Unit 폴더에서도
+                                        unit_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "Unit", f"{name_without_ext}.json")
+                                        json_candidates.append(unit_base)
+
+                                        # /img 폴더에서도
+                                        img_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "img", json_struct_path)
+                                        json_candidates.append(img_base)
+
+                            # 기존 방식도 유지 (폴백)
+                            number_pattern_in_base = re.search(r'/test/(\d+)/', self.json_base)
+                            if number_pattern_in_base:
+                                number_part = number_pattern_in_base.group(1)
+                                unit_base = self.json_base.replace(f'/test/{number_part}/', '/test/Unit/')
+                                json_candidates.extend([
+                                    os.path.join(unit_base, name_without_ext + '.json'),
+                                    os.path.join(unit_base, filename),
+                                ])
+
+                            # Unit 폴더 간 검색 (U0 -> U9, U12 등)
+                            if '/Unit/' in self.json_base:
+                                # Unit 폴더 목록
+                                unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
+
+                                for unit_folder in unit_folders:
+                                    # 기본 Unit 경로에서
+                                    unit_path = self.json_base.replace('/Unit/U0/', f'/Unit/{unit_folder}/')
+                                    json_candidates.extend([
+                                        os.path.join(unit_path, name_without_ext + '.json'),
+                                        os.path.join(unit_path, filename),
+                                    ])
+
+                                    # /img Unit 경로에서도
+                                    if number_pattern_in_base:
+                                        number_part = number_pattern_in_base.group(1)
+                                        img_unit_path = self.json_base.replace(f'/test/{number_part}/', '/test/img/1/').replace('/Unit/U0/', f'/Unit/{unit_folder}/')
+                                        json_candidates.extend([
+                                            os.path.join(img_unit_path, name_without_ext + '.json'),
+                                            os.path.join(img_unit_path, filename),
+                                        ])
+
+                            # 기존 Unit 기반 폴백
+                            if "Unit" in self.json_base:
+                                unit_parent = os.path.dirname(self.json_base)
+                                json_candidates.extend([
+                                    os.path.join(unit_parent, "**", name_without_ext + '.json'),
+                                    os.path.join(unit_parent, "**", filename),
+                                ])
+
+                            # Unit 폴더의 모든 하위 폴더에서 찾기
+                            for root, dirs, files in os.walk(self.json_base):
+                                for file in files:
+                                    if file == name_without_ext + '.json' or file == filename:
+                                        json_candidates.append(os.path.join(root, file))
+
+                            # 모든 후보 경로에서 검색
+                            for candidate in json_candidates:
+                                if os.path.exists(candidate):
+                                    json_file_path = candidate
+                                    print(f"✅ JSON 파일 발견: {candidate}")
+                                    break
+
+                                # glob 패턴으로 검색 (디렉토리인 경우)
+                                if os.path.isdir(os.path.dirname(candidate)):
+                                    import glob
+                                    pattern = os.path.join(os.path.dirname(candidate), "**", os.path.basename(candidate))
+                                    matches = glob.glob(pattern, recursive=True)
+                                    if matches:
+                                        json_file_path = matches[0]
+                                        print(f"✅ JSON 파일 발견 (재귀 검색): {json_file_path}")
+                                        break
+
+                    # 3. 기존 방식으로도 시도 (fallback)
                     if json_file_path is None and self.json_base:
                         # 상대 경로를 JSON 기본 경로와 결합
                         combined_path = os.path.join(self.json_base, result_path_str.lstrip('/'))
@@ -3689,12 +4194,28 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                         details = extract_detail_from_json(json_file_path)
                         overlay_info['details'] = details
 
+                        # bbox 정보 추출
+                        bboxes = extract_bbox_from_json(json_file_path)
+                        overlay_info['bboxes'] = bboxes
+                        print(f"📦 bbox 추출 완료: {len(bboxes)}개 (JSON: {json_file_path})")
+                        if bboxes:
+                            print(f"🎯 bbox 데이터 발견!")
+                            for i, bbox in enumerate(bboxes[:3]):  # 처음 3개만 출력
+                                print(f"   bbox[{i}]: {bbox['label']} at {bbox['bbox']} (score: {bbox['score']:.3f})")
+                        else:
+                            print(f"⚠️ bbox 데이터 없음")
+
                         # 런랭스 마스크 정보 추출
                         annotations, image_size = self._extract_run_length_data(json_file_path)
                         overlay_info['annotations'] = annotations
                         overlay_info['image_size'] = image_size
-                        overlay_info['has_overlay'] = len(annotations) > 0 or len(details) > 0
-                        print(f"JSON 파일 발견: {json_file_path}")
+                        overlay_info['has_overlay'] = len(annotations) > 0 or len(details) > 0 or len(bboxes) > 0
+                        print(f"✅ JSON 파일 발견: {json_file_path}")
+                        print(f"   - bbox: {len(bboxes)}개")
+                        print(f"   - annotations: {len(annotations)}개")
+                        print(f"   - details: {len(details)}개")
+                        print(f"   - has_overlay: {overlay_info['has_overlay']}")
+                        print(f"   - show_overlay: {self.show_overlay}")
                     else:
                         print(f"JSON 파일을 찾을 수 없음: {result_path_str} (기본 경로: {self.json_base})")
 
@@ -3773,6 +4294,22 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
             # JSON 정보 추출 및 오버레이 데이터 준비
             overlay_info = self._prepare_overlay_info(row_idx)
+            print(f"📋 오버레이 정보: JSON 찾음={overlay_info['json_found']}, 오버레이={overlay_info['has_overlay']}")
+            
+            # 상태창에 JSON 매칭 정보 표시
+            if overlay_info['json_found']:
+                bbox_count = len(overlay_info.get('bboxes', []))
+                annotation_count = len(overlay_info.get('annotations', []))
+                if bbox_count > 0 or annotation_count > 0:
+                    status_msg = f"📄 JSON 매칭됨: bbox {bbox_count}개, 어노테이션 {annotation_count}개"
+                else:
+                    status_msg = "📄 JSON 파일 있음 (데이터 없음)"
+                self.status.showMessage(status_msg, 5000)
+                print(f"   JSON 경로: {overlay_info['json_path']}")
+                print(f"   bbox 개수: {bbox_count}")
+                print(f"   어노테이션 개수: {annotation_count}")
+            else:
+                self.status.showMessage("❌ JSON 파일 매칭 실패", 3000)
         
             print(f"이미지 로드 시도: 행 {row_idx}, 경로: {File_path_str}")
             print(f"  기본 경로: {self.images_base}")
@@ -3875,11 +4412,25 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
             # 오버레이 정보가 있으면 추가
             if overlay_info.get('has_overlay', False):
+                print(f"🎨 오버레이 적용 시작 (show_overlay: {self.show_overlay})")
+                original_cache_key = display_pixmap.cacheKey()
                 display_pixmap = self._add_overlay_to_pixmap(display_pixmap, overlay_info)
+                new_cache_key = display_pixmap.cacheKey()
+                print(f"🎨 오버레이 적용 완료 (pixmap 변경됨: {original_cache_key != new_cache_key})")
+                
+                # 오버레이 적용 성공 시 상태창 업데이트
+                if self.show_overlay:
+                    bbox_count = len(overlay_info.get('bboxes', []))
+                    annotation_count = len(overlay_info.get('annotations', []))
+                    if bbox_count > 0 or annotation_count > 0:
+                        self.status.showMessage(f"✅ 오버레이 적용됨: bbox {bbox_count}개, 어노테이션 {annotation_count}개", 3000)
+                    else:
+                        self.status.showMessage("⚠️ 오버레이 적용됨 (데이터 없음)", 3000)
 
             if hasattr(self, 'image_label') and self.image_label is not None:
                 try:
                     self.image_label.setPixmap(display_pixmap)
+                    print(f"🖼️ 이미지 레이블에 픽스맵 설정 완료: {display_pixmap.width()}x{display_pixmap.height()}")
                 except RuntimeError:
                     pass  # Widget has been deleted
             
@@ -3901,20 +4452,40 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
     def _add_overlay_to_pixmap(self, pixmap: QtGui.QPixmap, overlay_info: dict) -> QtGui.QPixmap:
         """픽스맵에 오버레이 정보를 추가합니다."""
+        print(f"🎨 _add_overlay_to_pixmap 시작")
+        print(f"   - has_overlay: {overlay_info.get('has_overlay', False)}")
+        print(f"   - show_overlay: {self.show_overlay}")
+        print(f"   - bboxes: {len(overlay_info.get('bboxes', []))}개")
+        print(f"   - annotations: {len(overlay_info.get('annotations', []))}개")
+
         if not overlay_info.get('has_overlay', False):
+            print("⚠️ has_overlay가 False이므로 오버레이 생략")
+            print(f"   현재 상태: bboxes={len(overlay_info.get('bboxes', []))}, annotations={len(overlay_info.get('annotations', []))}, details={len(overlay_info.get('details', []))}")
             return pixmap
 
+        # 원본 픽스맵을 복사하여 수정
+        overlay_pixmap = pixmap.copy()
+        print(f"✅ 픽스맵 복사 완료: {overlay_pixmap.width()}x{overlay_pixmap.height()}")
+
+        # QPainter를 사용하여 텍스트 그리기
+        painter = QtGui.QPainter(overlay_pixmap)
         try:
-            # 원본 픽스맵을 복사하여 수정
-            overlay_pixmap = pixmap.copy()
-
-            # QPainter를 사용하여 텍스트 그리기
-            painter = QtGui.QPainter(overlay_pixmap)
             painter.setRenderHint(QtGui.QPainter.Antialiasing)
+            print("✅ QPainter 생성 완료")
 
-            # 런랭스 마스크 오버레이 먼저 그리기 (텍스트 아래에 표시되도록)
+            # bbox 오버레이 먼저 그리기 (가장 아래에 표시되도록)
+            if overlay_info.get('bboxes') and self.show_overlay:
+                print(f"🎨 bbox 오버레이 그리기: {len(overlay_info['bboxes'])}개")
+                self._draw_bbox_overlay(painter, overlay_info, pixmap.width(), pixmap.height())
+            elif overlay_info.get('bboxes'):
+                print(f"⚠️ bbox 데이터 있지만 오버레이 꺼짐: {len(overlay_info['bboxes'])}개")
+
+            # 런랭스 마스크 오버레이 그리기 (bbox 위에 표시되도록)
             if overlay_info.get('annotations') and self.show_overlay:
+                print(f"🎨 런랭스 오버레이 그리기: {len(overlay_info['annotations'])}개")
                 self._draw_run_length_overlay(painter, overlay_info, pixmap.width(), pixmap.height())
+            elif overlay_info.get('annotations'):
+                print(f"⚠️ 런랭스 데이터 있지만 오버레이 꺼짐: {len(overlay_info['annotations'])}개")
 
             # 폰트 설정
             font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
@@ -3943,7 +4514,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 for i, ann in enumerate(overlay_info['annotations'][:3]):  # 최대 3개 어노테이션 표시
                     label = ann.get('label', 'Unknown')
                     score = ann.get('score', 0.0)
-                    overlay_lines.append(".1f")
+                    overlay_lines.append(f"• {label}: {score:.1f}")
 
             if overlay_info.get('details') and not overlay_info.get('annotations'):
                 for i, detail in enumerate(overlay_info['details'][:3]):  # 최대 3개까지만 표시
@@ -3960,7 +4531,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             # 오버레이 배경 영역 계산
             max_text_width = 0
             for line in overlay_lines:
-                max_text_width = max(max_text_width, font_metrics.width(line))
+                max_text_width = max(max_text_width, font_metrics.horizontalAdvance(line))
 
             overlay_width = max_text_width + (padding * 2)
             overlay_height = (line_height * len(overlay_lines)) + (padding * 2)
@@ -3979,13 +4550,108 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 painter.drawText(overlay_x + padding, text_y, line)
                 text_y += line_height
 
-            painter.end()
-
-            return overlay_pixmap
+            print(f"🎨 오버레이 픽스맵 생성 완료: {overlay_pixmap.width()}x{overlay_pixmap.height()}")
+            print(f"   원본과 다른가?: {overlay_pixmap.cacheKey() != pixmap.cacheKey()}")
 
         except Exception as e:
             print(f"오버레이 추가 중 오류: {e}")
-            return pixmap
+            import traceback
+            traceback.print_exc()
+        finally:
+            # QPainter 안전하게 종료
+            if painter.isActive():
+                painter.end()
+                print("✅ QPainter 종료됨")
+
+        return overlay_pixmap
+
+    def _draw_bbox_overlay(self, painter: QtGui.QPainter, overlay_info: dict, img_width: int, img_height: int):
+        """bbox 정보를 이미지 위에 사각형 오버레이로 그립니다."""
+        try:
+            bboxes = overlay_info.get('bboxes', [])
+            print(f"🎨 _draw_bbox_overlay 시작: {len(bboxes)}개 bbox")
+            if not bboxes:
+                print("⚠️ bbox 데이터가 없음")
+                return
+
+            # label별 색상 캐시 (중복 계산 방지)
+            if not hasattr(self, '_label_color_cache'):
+                self._label_color_cache = {}
+
+            drawn_count = 0
+            for i, bbox_info in enumerate(bboxes):
+                bbox = bbox_info.get('bbox', [])
+                label = bbox_info.get('label', 'Unknown')
+                score = bbox_info.get('score', 0.0)
+                print(f"   bbox[{i}] 처리 중: {label} (score: {score:.2f}), coords: {bbox}")
+
+                if len(bbox) != 4:
+                    print(f"⚠️ bbox[{i}] 형식이 잘못됨: {bbox}")
+                    continue
+
+                x1, y1, x2, y2 = bbox
+                
+                # JSON 이미지 크기와 실제 표시 이미지 크기 간 스케일링 적용
+                json_img_width = bbox_info.get('json_img_width')
+                json_img_height = bbox_info.get('json_img_height')
+                
+                if json_img_width and json_img_height:
+                    # 스케일 팩터 계산
+                    scale_x = img_width / json_img_width
+                    scale_y = img_height / json_img_height
+                    
+                    # bbox 좌표 스케일링
+                    x1 = int(x1 * scale_x)
+                    y1 = int(y1 * scale_y) 
+                    x2 = int(x2 * scale_x)
+                    y2 = int(y2 * scale_y)
+                    
+                    print(f"📦 bbox[{i}] 스케일링 적용: {label}")
+                    print(f"   JSON 크기: {json_img_width}x{json_img_height} → 표시 크기: {img_width}x{img_height}")
+                    print(f"   스케일: {scale_x:.3f}x{scale_y:.3f}")
+                    print(f"   좌표: {bbox} → [{x1},{y1},{x2},{y2}]")
+                else:
+                    print(f"📦 bbox[{i}]: {label} at ({x1},{y1})-({x2},{y2}) score={score:.3f} (스케일링 없음)")
+
+                # label별 유니크 색상 생성/캐시
+                if label not in self._label_color_cache:
+                    self._label_color_cache[label] = generate_label_color(label)
+                    print(f"🎨 새 색상 생성: {label} -> {self._label_color_cache[label].name()}")
+
+                color = self._label_color_cache[label]
+
+                # 사각형 테두리 그리기
+                pen = QtGui.QPen(color, 3)  # 3px 두께의 테두리
+                painter.setPen(pen)
+                rect = QtCore.QRectF(x1, y1, x2 - x1, y2 - y1)
+                painter.drawRect(rect)
+                print(f"✅ 사각형 그리기 완료: {rect} (펜: {pen.color().name()}, 두께: {pen.width()})")
+
+                # 텍스트 배경을 위한 사각형 (반투명)
+                text_bg_color = QtGui.QColor(color)
+                text_bg_color.setAlpha(180)  # 70% 불투명
+                text_rect = QtCore.QRectF(x1, y1 - 25, x2 - x1, 20)
+                painter.fillRect(text_rect, text_bg_color)
+                print(f"✅ 텍스트 배경 그리기 완료: {text_rect}")
+
+                # 텍스트 그리기 (흰색)
+                painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255), 2))
+                font = QtGui.QFont("Arial", 10, QtGui.QFont.Bold)
+                painter.setFont(font)
+
+                # label과 score 표시
+                text = f"{label}: {score:.3f}"
+                painter.drawText(int(x1 + 5), int(y1 - 8), text)
+                print(f"✅ 텍스트 그리기 완료: '{text}'")
+
+                drawn_count += 1
+
+            print(f"🎉 bbox 오버레이 완료: {drawn_count}/{len(bboxes)}개 그리기 성공")
+
+        except Exception as e:
+            print(f"❌ bbox 오버레이 그리기 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _draw_run_length_overlay(self, painter: QtGui.QPainter, overlay_info: dict, img_width: int, img_height: int):
         """런랭스 마스크를 이미지 위에 오버레이로 그립니다."""
@@ -4940,7 +5606,7 @@ def _get_saved_settings_from_qsettings() -> dict:
         csv_path = settings.value("last_csv_path", "", type=str)
         images_base = settings.value("last_images_base", "", type=str)
         json_base = settings.value("last_json_base", "", type=str)
-        csv_type = settings.value("last_csv_type", "inference", type=str)
+        csv_type = settings.value("last_csv_type", "report", type=str)
         return {
             "csv_path": csv_path,
             "images_base": images_base,
@@ -4953,7 +5619,7 @@ def _get_saved_settings_from_qsettings() -> dict:
             "csv_path": "",
             "images_base": "",
             "json_base": "",
-            "csv_type": "inference",
+            "csv_type": "report",
         }
 
 def main():

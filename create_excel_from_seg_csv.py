@@ -48,63 +48,204 @@ def normalize_relative_path(path_from_csv: str) -> str:
 def resolve_image_path(images_base: str, csv_img_path: str) -> Optional[str]:
     """Resolve CSV image path to an absolute path under images_base.
 
-    Strategy:
-    1) Join images_base with normalized relative path
-    2) If not found, search by basename anywhere under images_base
+    Enhanced Strategy for new /1/ based folder structure:
+    - 새로운 기본 경로: /Users/yunamgyu/Downloads/test/1/0001/Unit/U0/BC
+    - CSV File_path에서 /1/ 이하 상대 경로 추출 및 매칭
+    - /1/ 구조를 고려한 다중 경로 검색
+
+    Search patterns:
+    1) /1/ 이하 상대 경로 추출 및 결합
+    2) /img 폴더에서도 검색 (실제 파일 위치)
+    3) Unit 폴더 간 매칭 (U0, U9, U12 등)
+    4) 확장자 변환 및 재귀 검색
     """
     if not csv_img_path:
         return None
 
+    # 절대 경로로 존재하는지 확인
     if os.path.isabs(csv_img_path) and os.path.exists(csv_img_path):
         return csv_img_path
 
-    rel = normalize_relative_path(csv_img_path)
-    candidate = os.path.join(images_base, rel)
-    if os.path.exists(candidate):
-        return candidate
+    print(f"🔍 패턴 기반 초유연 매칭 시작: {csv_img_path}")
 
-    # Try corresponding *_viz.png next to the expected location
-    rel_dir = os.path.dirname(rel)
-    rel_base, _ = os.path.splitext(os.path.basename(rel))
-    viz_candidate = os.path.join(images_base, rel_dir, f"{rel_base}_viz.png")
-    if os.path.exists(viz_candidate):
-        return viz_candidate
+    # 0. Windows 백슬래시를 Unix 슬래시로 변환 (새로운 패턴 지원)
+    normalized_csv_path = csv_img_path.replace('\\', '/')
+    if normalized_csv_path != csv_img_path:
+        print(f"🔄 Windows 경로 변환: {csv_img_path} -> {normalized_csv_path}")
+        csv_img_path = normalized_csv_path
 
-    # More precise fallbacks: search by basename with stricter matching
-    basename = os.path.basename(rel)
-    base_no_ext, _ = os.path.splitext(basename)
-    
-    # First try exact filename match
-    exact_pattern = os.path.join(images_base, "**", basename)
-    exact_matches = glob.glob(exact_pattern, recursive=True)
-    if exact_matches:
-        return exact_matches[0]
-    
-    # Then try exact base name with any extension (but not with suffixes)
-    base_pattern = os.path.join(images_base, "**", f"{base_no_ext}.*")
-    base_matches = glob.glob(base_pattern, recursive=True)
-    if base_matches:
-        # Filter out matches that have additional suffixes (like _viz, _p17, etc.)
-        filtered_matches = []
-        for match in base_matches:
-            match_basename = os.path.basename(match)
-            match_base_no_ext, _ = os.path.splitext(match_basename)
-            # Only accept if the base name is exactly the same (no additional suffixes)
-            if match_base_no_ext == base_no_ext:
-                filtered_matches.append(match)
-        
-        if filtered_matches:
-            return filtered_matches[0]
-    
-    # Finally, try with _viz suffix only if the original has a specific pattern
-    if not base_no_ext.endswith('_viz'):
-        viz_pattern = os.path.join(images_base, "**", f"{base_no_ext}_viz.*")
-        viz_matches = glob.glob(viz_pattern, recursive=True)
-        if viz_matches:
-            return viz_matches[0]
-    
-    # If no exact match found, return None instead of falling back to fuzzy matching
-    # This prevents wrong matches like 0129_U29_BC_p1.bmp -> 0048_U126_BC_p2_viz.png
+    # 1. CSV 경로 구조 분석 및 패턴 추출
+    import re
+
+    # /숫자/ 패턴 추출 (개선된 정규식)
+    number_pattern = re.search(r'/(\d+)/', csv_img_path)
+    csv_structure = {}
+
+    if number_pattern:
+        csv_number = number_pattern.group(1)
+        csv_structure['number'] = csv_number
+
+        # /숫자/ 이후 경로 분석
+        after_number = csv_img_path.split(f'/{csv_number}/', 1)[1]
+        path_parts = after_number.split('/')
+
+        if len(path_parts) >= 4:
+            csv_structure.update({
+                'part1': path_parts[0],  # 0001 (4자리 숫자)
+                'part2': path_parts[1],  # Unit (고정)
+                'part3': path_parts[2],  # U12, U70 등 (U+숫자)
+                'part4': path_parts[3],  # BC, FC 등 (타입)
+                'filename': path_parts[-1] if len(path_parts) > 4 else path_parts[-1]
+            })
+
+        print(f"📊 CSV 구조 분석: {csv_structure}")
+        print(f"🎯 매칭 패턴: {csv_number}/{csv_structure.get('part1', '*')}/{csv_structure.get('part2', '*')}/{csv_structure.get('part3', 'U*')}/{csv_structure.get('filename', '*.jpg')}")
+
+    # 2. 기본 경로 구조 분석
+    base_structure = {}
+    base_number_pattern = re.search(r'/test/(\d+)/', images_base)
+    if base_number_pattern:
+        base_number = base_number_pattern.group(1)
+        base_structure['number'] = base_number
+
+        # 기본 경로의 나머지 부분 분석
+        after_base_number = images_base.split(f'/test/{base_number}/', 1)[1]
+        base_path_parts = after_base_number.split('/')
+
+        if len(base_path_parts) >= 4:
+            base_structure.update({
+                'part1': base_path_parts[0],
+                'part2': base_path_parts[1],
+                'part3': base_path_parts[2],
+                'part4': base_path_parts[3],
+            })
+
+        print(f"📊 기본 경로 구조: {base_structure}")
+
+    # 3. 패턴 기반 최적화 매칭
+    search_patterns = []
+    basename = os.path.basename(csv_img_path)
+    base_no_ext, original_ext = os.path.splitext(basename)
+
+    # 우선순위 1: 정확한 구조 매칭 (CSV 구조를 기본 경로에 적용)
+    if csv_structure and base_structure:
+        target_number = base_structure.get('number', csv_structure.get('number', '1'))
+
+        # U* 패턴 우선: U로 시작하는 폴더만 검색 (최적화)
+        u_folders = []
+        # 기존 unit_folders + 동적 생성
+        base_u_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
+
+        # CSV의 U+숫자 패턴이 있다면 우선 추가
+        if csv_structure.get('part3', '').startswith('U'):
+            csv_u_folder = csv_structure['part3']
+            if csv_u_folder not in base_u_folders:
+                base_u_folders.insert(0, csv_u_folder)  # 우선순위 높임
+
+        u_folders = base_u_folders
+        type_folders = ['BC', 'FC', 'DC']
+
+        # 4자리 숫자 우선 매칭 (0001, 0002 등)
+        part1_candidates = []
+        if len(csv_structure.get('part1', '')) == 4 and csv_structure['part1'].isdigit():
+            # CSV의 4자리 숫자를 우선 사용
+            part1_candidates.append(csv_structure['part1'])
+        part1_candidates.extend([base_structure.get('part1', '0001'), '0001', '0002', '0003'])
+
+        for part1 in part1_candidates[:3]:  # 상위 3개만
+            for unit in u_folders[:10]:  # 상위 10개 U 폴더만 (성능 최적화)
+                for type_folder in type_folders:
+                    # 구조 기반 경로 생성
+                    struct_path = f"{target_number}/{part1}/{base_structure.get('part2', 'Unit')}/{unit}/{type_folder}/{basename}"
+                    search_patterns.append(os.path.join(images_base.split(f'/test/{base_structure.get("number", "1")}/')[0], "test", struct_path))
+
+                    # /img 폴더에서도 검색
+                    img_base = images_base.replace('/test/', '/test/img/')
+                    if img_base != images_base:
+                        search_patterns.append(os.path.join(img_base.split(f'/test/img/{base_structure.get("number", "1")}/')[0], "test", "img", struct_path))
+
+    # 우선순위 2: p* 패턴 우선 검색 (p로 시작하는 파일만)
+    if basename.startswith('p') or base_no_ext.startswith('p'):
+        # p로 시작하는 파일 패턴들
+        p_patterns = [
+            os.path.join(images_base, "**", f"p*.{original_ext[1:]}" if original_ext else "p*"),
+            os.path.join(images_base, "**", f"p*.jpg"),
+            os.path.join(images_base, "**", f"p*.png"),
+            os.path.join(images_base, "**", f"p*.bmp"),
+        ]
+        search_patterns.extend(p_patterns)
+
+    # 우선순위 3: 기본 파일명 패턴들
+    search_patterns.extend([
+        os.path.join(images_base, "**", basename),
+        os.path.join(images_base, "**", f"{base_no_ext}.*"),
+    ])
+
+    # 4. 확장자 변환 패턴 추가 (우선순위 4)
+    ext_mapping = {
+        '.bmp': ['.jpg', '.jpeg', '.png'],
+        '.png': ['.jpg', '.jpeg', '.bmp'],
+        '.jpg': ['.jpeg', '.png', '.bmp'],
+        '.jpeg': ['.jpg', '.png', '.bmp']
+    }
+
+    if original_ext.lower() in ext_mapping:
+        for new_ext in ext_mapping[original_ext.lower()]:
+            search_patterns.extend([
+                os.path.join(images_base, "**", f"{base_no_ext}{new_ext}"),
+                os.path.join(images_base.replace('/test/', '/test/img/'), "**", f"{base_no_ext}{new_ext}")
+            ])
+
+    # 5. 중복 제거 및 우선순위 정렬
+    seen_patterns = set()
+    unique_patterns = []
+    for pattern in search_patterns:
+        if pattern not in seen_patterns:
+            seen_patterns.add(pattern)
+            unique_patterns.append(pattern)
+
+    print(f"🔍 생성된 검색 패턴 수: {len(unique_patterns)} (우선순위 최적화)")
+
+    # 6. 실제 검색 수행 (우선순위 기반)
+    all_matches = []
+
+    # 우선순위 그룹별 검색
+    priority_groups = [
+        unique_patterns[:10],    # 구조 매칭 우선 (상위 10개)
+        unique_patterns[10:30],  # p* 패턴 (다음 20개)
+        unique_patterns[30:50],  # 기본 패턴 (다음 20개)
+        unique_patterns[50:70],  # 확장자 변환 (다음 20개)
+    ]
+
+    for group_idx, group in enumerate(priority_groups):
+        if not group:
+            continue
+
+        print(f"🎯 우선순위 그룹 {group_idx + 1} 검색 중...")
+        for pattern in group:
+            try:
+                if os.path.exists(pattern):
+                    print(f"✅ 우선순위 {group_idx + 1} - 직접 경로 매치: {pattern}")
+                    return pattern
+
+                matches = glob.glob(pattern, recursive=True)
+                if matches:
+                    for match in matches:
+                        match_basename = os.path.basename(match)
+                        if match_basename == basename:
+                            print(f"✅ 우선순위 {group_idx + 1} - 정확한 파일명 매치: {match}")
+                            return match
+                        all_matches.append(match)
+            except:
+                continue
+
+    # 7. 매치 결과 반환
+    if all_matches:
+        best_match = all_matches[0]
+        print(f"✅ 구조 기반 매칭 성공: {best_match}")
+        return best_match
+
+    print(f"❌ 모든 패턴으로 검색했으나 파일을 찾을 수 없음: {basename}")
     return None
 
 

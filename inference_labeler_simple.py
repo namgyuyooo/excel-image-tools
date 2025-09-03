@@ -45,16 +45,16 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
         # 설정에서 경로 가져오기
         if settings:
-            self.csv_path = settings.get("csv_path", CSV_CONFIGS["inference"]["csv_path"])
-            self.images_base = settings.get("images_base", CSV_CONFIGS["inference"]["images_base"])
-            self.json_base = settings.get("json_base", CSV_CONFIGS["inference"]["json_base"])
-            csv_type = settings.get("csv_type", "inference")
+            self.csv_path = settings.get("csv_path", CSV_CONFIGS["report"]["csv_path"])
+            self.images_base = settings.get("images_base", CSV_CONFIGS["report"]["images_base"])
+            self.json_base = settings.get("json_base", CSV_CONFIGS["report"]["json_base"])
+            csv_type = settings.get("csv_type", "report")
             self.setWindowTitle(f"추론 결과 라벨링 도구 - {csv_type.upper()} ({os.path.basename(self.csv_path)})")
         else:
             # 기본값 사용
-            self.csv_path = CSV_CONFIGS["inference"]["csv_path"]
-            self.images_base = CSV_CONFIGS["inference"]["images_base"]
-            self.json_base = CSV_CONFIGS["inference"]["json_base"]
+            self.csv_path = CSV_CONFIGS["report"]["csv_path"]
+            self.images_base = CSV_CONFIGS["report"]["images_base"]
+            self.json_base = CSV_CONFIGS["report"]["json_base"]
 
         # State 초기화
         self.df: Optional[pd.DataFrame] = None

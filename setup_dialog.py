@@ -22,7 +22,7 @@ class SetupWindow(QtWidgets.QDialog):
         self.csv_path = ""
         self.images_base = ""
         self.json_base = ""
-        self.csv_type = "inference"
+        self.csv_type = "report"  # 리포트 단일로 고정
 
         self._build_ui()
         self._load_default_paths()
@@ -110,25 +110,19 @@ class SetupWindow(QtWidgets.QDialog):
         json_layout.addLayout(json_path_layout)
         layout.addWidget(json_group)
 
-        # CSV 타입 선택
-        type_group = QtWidgets.QGroupBox("CSV 타입 선택")
+        # CSV 타입 선택 (리포트 단일로 고정)
+        type_group = QtWidgets.QGroupBox("CSV 타입 설정")
         type_layout = QtWidgets.QVBoxLayout(type_group)
 
-        type_info = QtWidgets.QLabel("CSV 파일의 타입을 선택하면 자동으로 기본 경로가 설정됩니다.")
+        type_info = QtWidgets.QLabel("CSV 타입: 리포트 단일 (Report Single)")
+        type_info.setStyleSheet("font-weight: bold; color: #1976d2;")
         type_layout.addWidget(type_info)
 
-        type_buttons_layout = QtWidgets.QHBoxLayout()
+        # 고정된 타입 표시
+        type_display = QtWidgets.QLabel("📊 리포트 CSV 파일을 사용합니다.")
+        type_display.setStyleSheet("color: #666; font-style: italic;")
+        type_layout.addWidget(type_display)
 
-        self.inference_radio = QtWidgets.QRadioButton("Inference Results")
-        self.inference_radio.setChecked(True)
-        self.inference_radio.toggled.connect(self._on_type_changed)
-        type_buttons_layout.addWidget(self.inference_radio)
-
-        self.report_radio = QtWidgets.QRadioButton("Report")
-        self.report_radio.toggled.connect(self._on_type_changed)
-        type_buttons_layout.addWidget(self.report_radio)
-
-        type_layout.addLayout(type_buttons_layout)
         layout.addWidget(type_group)
 
         # 마지막 경로 설정 복원 버튼
@@ -183,11 +177,11 @@ class SetupWindow(QtWidgets.QDialog):
 
     def _load_default_paths(self):
         """기본 경로 로드"""
-        # inference 타입이 기본값
-        self.csv_type = "inference"
-        self.csv_path = CSV_CONFIGS["inference"]["csv_path"]
-        self.images_base = CSV_CONFIGS["inference"]["images_base"]
-        self.json_base = CSV_CONFIGS["inference"]["json_base"]
+        # 리포트 단일 타입이 기본값
+        self.csv_type = "report"
+        self.csv_path = CSV_CONFIGS["report"]["csv_path"]
+        self.images_base = CSV_CONFIGS["report"]["images_base"]
+        self.json_base = CSV_CONFIGS["report"]["json_base"]
 
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
@@ -204,12 +198,6 @@ class SetupWindow(QtWidgets.QDialog):
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
         self.json_path_edit.setText(self.json_base)
-
-        # CSV 타입에 맞게 라디오 버튼 설정
-        if self.csv_type == "inference":
-            self.inference_radio.setChecked(True)
-        else:
-            self.report_radio.setChecked(True)
 
         self._update_test_button_state()
         print("저장된 경로 설정이 복원되었습니다.")
@@ -238,23 +226,7 @@ class SetupWindow(QtWidgets.QDialog):
            self.json_base != CSV_CONFIGS[self.csv_type]["json_base"]:
             print("저장된 경로 설정이 복원되었습니다.")
 
-    def _on_type_changed(self):
-        """CSV 타입 변경 시 처리"""
-        if self.inference_radio.isChecked():
-            self.csv_type = "inference"
-        else:
-            self.csv_type = "report"
 
-        # 타입에 따라 기본 경로 설정
-        self.csv_path = CSV_CONFIGS[self.csv_type]["csv_path"]
-        self.images_base = CSV_CONFIGS[self.csv_type]["images_base"]
-        self.json_base = CSV_CONFIGS[self.csv_type]["json_base"]
-
-        self.csv_path_edit.setText(self.csv_path)
-        self.images_path_edit.setText(self.images_base)
-        self.json_path_edit.setText(self.json_base)
-
-        self._update_test_button_state()
 
     def _browse_csv(self):
         """CSV 파일 찾기"""
@@ -269,13 +241,7 @@ class SetupWindow(QtWidgets.QDialog):
             self.csv_path = file_path
             self.csv_path_edit.setText(file_path)
 
-            # 파일명을 기반으로 타입 자동 감지
-            detected_type = detect_csv_type(file_path)
-            if detected_type == "inference":
-                self.inference_radio.setChecked(True)
-            elif detected_type == "report":
-                self.report_radio.setChecked(True)
-
+            # 리포트 단일 타입으로 고정되어 있으므로 별도 처리 불필요
             self._update_test_button_state()
 
     def _browse_images(self):
@@ -396,7 +362,7 @@ class SetupWindow(QtWidgets.QDialog):
         last_csv_path = settings.value("last_csv_path", "")
         last_images_base = settings.value("last_images_base", "")
         last_json_base = settings.value("last_json_base", "")
-        last_csv_type = settings.value("last_csv_type", "inference")
+        last_csv_type = settings.value("last_csv_type", "report")
 
         if last_csv_path and os.path.exists(last_csv_path):
             self.csv_path = last_csv_path
