@@ -30,6 +30,7 @@ CSV_CONFIGS = {
     "report": {
         "csv_path": "",  # 동적으로 설정됨
         "images_base": "",  # 동적으로 설정됨
+        "json_base": "",  # 동적으로 설정됨
     }
 }
 
@@ -662,7 +663,6 @@ class SetupWindow(QtWidgets.QDialog):
         self.csv_type = "report"
         self.csv_path = CSV_CONFIGS["report"]["csv_path"]
         self.images_base = CSV_CONFIGS["report"]["images_base"]
-        self.json_base = CSV_CONFIGS["report"]["json_base"]
 
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
@@ -697,8 +697,7 @@ class SetupWindow(QtWidgets.QDialog):
             
             
         if self.csv_path != CSV_CONFIGS[self.csv_type]["csv_path"] or \
-           self.images_base != CSV_CONFIGS[self.csv_type]["images_base"] or \
-           self.json_base != CSV_CONFIGS[self.csv_type]["json_base"]:
+           self.images_base != CSV_CONFIGS[self.csv_type]["images_base"]:
             print("저장된 경로 설정이 복원되었습니다.")
     
 
@@ -792,156 +791,8 @@ class SetupWindow(QtWidgets.QDialog):
                 else:
                     print(f"  ❌ 이미지: 찾을 수 없음")
 
-                # 2. JSON 파일 매칭 테스트 (개선된 알고리즘)
-                json_found = False
-                if self.json_base:
-                    # File_path에서 파일명 추출
-                    filename = os.path.basename(file_path)
-                    name_without_ext = os.path.splitext(filename)[0]
-
-                    print(f"  🔍 JSON 검색: {filename} -> {name_without_ext}.json")
-
-                    # 개선된 JSON 검색 패턴들
-                    json_candidates = []
-
-                    # 기본 패턴들
-                    json_candidates.extend([
-                        os.path.join(self.json_base, name_without_ext + '.json'),
-                        os.path.join(self.json_base, filename + '.json'),
-                        os.path.join(self.json_base, filename),
-                        os.path.join(self.json_base, name_without_ext, name_without_ext + '.json'),
-                    ])
-
-                    # 초유연 구조 기반 JSON 검색
-                    import re
-
-                    # CSV File_path 구조 분석
-                    csv_number_pattern = re.search(r'/(\d+)/', file_path)
-                    csv_structure = {}
-
-                    if csv_number_pattern:
-                        csv_number = csv_number_pattern.group(1)
-                        csv_structure['number'] = csv_number
-
-                        # /숫자/ 이후 경로 분석
-                        after_number = file_path.split(f'/{csv_number}/', 1)[1]
-                        path_parts = after_number.split('/')
-
-                        if len(path_parts) >= 4:
-                            csv_structure.update({
-                                'part1': path_parts[0],  # 0001
-                                'part2': path_parts[1],  # Unit
-                                'part3': path_parts[2],  # U12, U70 등
-                                'part4': path_parts[3],  # BC, FC 등
-                            })
-
-                    # JSON 기본 경로 구조 분석
-                    base_number_pattern = re.search(r'/test/(\d+)/', self.json_base)
-                    base_structure = {}
-
-                    if base_number_pattern:
-                        base_number = base_number_pattern.group(1)
-                        base_structure['number'] = base_number
-
-                        # 기본 경로의 나머지 부분 분석
-                        after_base_number = self.json_base.split(f'/test/{base_number}/', 1)[1]
-                        base_path_parts = after_base_number.split('/')
-
-                        if len(base_path_parts) >= 4:
-                            base_structure.update({
-                                'part1': base_path_parts[0],
-                                'part2': base_path_parts[1],
-                                'part3': base_path_parts[2],
-                                'part4': base_path_parts[3],
-                            })
-
-                    # 구조 기반 JSON 패턴 생성
-                    if csv_structure and base_structure:
-                        # 다양한 Unit 폴더 조합 생성
-                        unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
-                        type_folders = ['BC', 'FC', 'DC']
-
-                        for unit in unit_folders:
-                            for type_folder in type_folders:
-                                # JSON 구조 기반 경로 생성
-                                json_struct_path = f"{base_number}/{base_structure.get('part2', 'Unit')}/{unit}/{type_folder}/{name_without_ext}.json"
-                                json_candidates.append(os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", json_struct_path))
-
-                                # /Unit 폴더에서도
-                                unit_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "Unit", f"{name_without_ext}.json")
-                                json_candidates.append(unit_base)
-
-                                # /img 폴더에서도
-                                img_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "img", json_struct_path)
-                                json_candidates.append(img_base)
-
-                    # 기존 방식도 유지 (폴백)
-                    number_pattern_in_base = re.search(r'/test/(\d+)/', self.json_base)
-                    if number_pattern_in_base:
-                        number_part = number_pattern_in_base.group(1)
-                        unit_base = self.json_base.replace(f'/test/{number_part}/', '/test/Unit/')
-                        json_candidates.extend([
-                            os.path.join(unit_base, name_without_ext + '.json'),
-                            os.path.join(unit_base, filename),
-                        ])
-
-                    # Unit 폴더 간 검색 (U0 -> U9, U12 등)
-                    if '/Unit/' in self.json_base:
-                        # Unit 폴더 목록
-                        unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
-
-                        for unit_folder in unit_folders:
-                            # 기본 Unit 경로에서
-                            unit_path = self.json_base.replace('/Unit/U0/', f'/Unit/{unit_folder}/')
-                            json_candidates.extend([
-                                os.path.join(unit_path, name_without_ext + '.json'),
-                                os.path.join(unit_path, filename),
-                            ])
-
-                            # /img Unit 경로에서도
-                            if number_pattern_in_base:
-                                number_part = number_pattern_in_base.group(1)
-                                img_unit_path = self.json_base.replace(f'/test/{number_part}/', '/test/img/1/').replace('/Unit/U0/', f'/Unit/{unit_folder}/')
-                                json_candidates.extend([
-                                    os.path.join(img_unit_path, name_without_ext + '.json'),
-                                    os.path.join(img_unit_path, filename),
-                                ])
-
-                        # 기존 Unit 기반 폴백
-                        unit_parent = os.path.dirname(self.json_base)
-                        json_candidates.extend([
-                            os.path.join(unit_parent, "**", name_without_ext + '.json'),
-                            os.path.join(unit_parent, "**", filename),
-                        ])
-
-                    # 모든 후보 경로에서 검색
-                    for candidate in json_candidates:
-                        if os.path.exists(candidate):
-                            json_matched_count += 1
-                            print(f"  ✅ JSON: {os.path.basename(candidate)} (경로: {os.path.dirname(candidate)})")
-                            if len(sample_json_matches) < 2:
-                                sample_json_matches.append(os.path.basename(candidate))
-                            json_found = True
-                            break
-
-                        # glob 패턴으로 검색 (디렉토리인 경우)
-                        if os.path.isdir(os.path.dirname(candidate)):
-                            import glob
-                            pattern = os.path.join(os.path.dirname(candidate), "**", os.path.basename(candidate))
-                            matches = glob.glob(pattern, recursive=True)
-                            if matches:
-                                json_matched_count += 1
-                                found_path = matches[0]
-                                print(f"  ✅ JSON: {os.path.basename(found_path)} (재귀 검색)")
-                                if len(sample_json_matches) < 2:
-                                    sample_json_matches.append(os.path.basename(found_path))
-                                json_found = True
-                                break
-
-                    if not json_found:
-                        print(f"  ❌ JSON: 찾을 수 없음 (기본경로: {self.json_base})")
-                else:
-                    print(f"  ⚠️ JSON 경로 설정 안됨")
+                # 2. JSON 파일 매칭 테스트 (제거됨)
+                print(f"  ⚠️ JSON 매칭 테스트: 제거됨")
 
             print(f"📈 매칭 결과:")
             print(f"   이미지: {image_matched_count}/{test_count}개 찾음")
@@ -998,7 +849,6 @@ class SetupWindow(QtWidgets.QDialog):
         return {
             "csv_path": self.csv_path,
             "images_base": self.images_base,
-            "json_base": self.json_base,
             "csv_type": self.csv_type,
             "skip_existing_labels": self.skip_existing_labels_chk.isChecked()
         }
@@ -1056,7 +906,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         if settings:
             self.csv_path = settings.get("csv_path", CSV_CONFIGS["report"]["csv_path"])
             self.images_base = settings.get("images_base", CSV_CONFIGS["report"]["images_base"])
-            self.json_base = settings.get("json_base", CSV_CONFIGS["report"]["json_base"])
             csv_type = settings.get("csv_type", "report")
             self.skip_existing_labels = settings.get("skip_existing_labels", False)
             self.setWindowTitle(f"추론 결과 라벨링 도구 - {csv_type.upper()} ({os.path.basename(self.csv_path)})")
@@ -1064,7 +913,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             # 기본값 사용
             self.csv_path = CSV_CONFIGS["report"]["csv_path"]
             self.images_base = CSV_CONFIGS["report"]["images_base"]
-            self.json_base = CSV_CONFIGS["report"]["json_base"]
             self.skip_existing_labels = False
         
         # State
@@ -1539,7 +1387,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             layout.addWidget(label)
 
             # 상태 정보 표시
-            info_label = QtWidgets.QLabel(f"CSV: {self.csv_path}\n이미지: {self.images_base}\nJSON: {self.json_base}")
+            info_label = QtWidgets.QLabel(f"CSV: {self.csv_path}\n이미지: {self.images_base}")
             info_label.setStyleSheet("font-size: 12px; color: blue;")
             layout.addWidget(info_label)
 
@@ -1899,19 +1747,34 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
             # 1. 전체 vs result ok 비율
             if "Result" in self.df.columns:
-                result_ok_mask = self.df["Result"] == "OK"
-                result_ok_count = result_ok_mask.sum()
+                # Result 컬럼에서 OK 값인 행들의 개수를 정확히 계산
+                result_ok_count = 0
+                unique_values = set()
+                for value in self.df["Result"]:
+                    unique_values.add(str(value).strip() if pd.notna(value) else "NaN")
+                    if pd.notna(value) and str(value).strip() == "OK":
+                        result_ok_count += 1
+                print(f"🔍 Result 컬럼 고유값들: {sorted(unique_values)}")
+                print(f"🔍 Result OK 계산: 총 {total_items}개 중 {result_ok_count}개 OK")
 
             # 2. result ok vs label ok 비율 (Result가 OK이고 Manual_Label도 OK인 경우)
             if "Result" in self.df.columns and self.active_label_col in self.df.columns:
-                result_ok_mask = self.df["Result"] == "OK"
-                label_ok_mask = self.df[self.active_label_col] == "OK"
-                result_ok_label_ok_count = (result_ok_mask & label_ok_mask).sum()
+                result_ok_label_ok_count = 0
+                for idx in range(len(self.df)):
+                    result_val = self.df.iloc[idx]["Result"]
+                    label_val = self.df.iloc[idx][self.active_label_col]
+                    if (pd.notna(result_val) and str(result_val).strip() == "OK" and
+                        pd.notna(label_val) and str(label_val).strip() == "OK"):
+                        result_ok_label_ok_count += 1
+                print(f"🔍 Result OK & Label OK 계산: {result_ok_label_ok_count}개 양쪽 OK")
 
             # 3. 전체 vs label ok 비율
             if self.active_label_col in self.df.columns:
-                label_ok_mask = self.df[self.active_label_col] == "OK"
-                label_ok_count = label_ok_mask.sum()
+                label_ok_count = 0
+                for value in self.df[self.active_label_col]:
+                    if pd.notna(value) and str(value).strip() == "OK":
+                        label_ok_count += 1
+                print(f"🔍 Label OK 계산: 총 {total_items}개 중 {label_ok_count}개 OK")
 
             # Create stats text
             remaining = total_items - labeled_count
@@ -3930,250 +3793,27 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self._update_progress_dashboard()
 
     def _prepare_overlay_info(self, row_idx: int) -> dict:
-        """JSON 파일에서 오버레이 정보를 준비합니다."""
+        """JSON 파일에서 오버레이 정보를 준비합니다. (기능 제거됨)"""
         overlay_info = {
             'json_found': False,
             'json_path': '',
             'details': [],
             'result': '',
-            'has_overlay': False,
+            'has_overlay': False,  # 오버레이 금지
             'annotations': [],  # 런랭스 마스크 정보 추가
             'image_size': None,
             'bboxes': []  # bbox 정보 추가
         }
 
-        try:
-            # Result_path에서 JSON 파일 경로 추출
-            if "Result_path" in self.df.columns:
-                result_path = self.df.at[row_idx, "Result_path"]
-                if pd.notna(result_path) and str(result_path).strip():
-                    result_path_str = str(result_path).strip()
-
-                    # JSON 파일 경로를 찾는 여러 방법 시도
-                    json_file_path = None
-
-                    # 1. 절대 경로로 존재하는지 확인
-                    if os.path.isabs(result_path_str):
-                        if result_path_str.endswith('.json'):
-                            json_file_path = result_path_str
-                        else:
-                            json_file_path = result_path_str + '.json'
-                        if not os.path.exists(json_file_path):
-                            json_file_path = None
-
-                    # 2. JSON 기본 경로에서 파일명으로 찾기 (개선된 알고리즘)
-                    if json_file_path is None and self.json_base:
-                        # File_path에서 파일명만 추출
-                        if "File_path" in self.df.columns:
-                            file_path = str(self.df.at[row_idx, "File_path"])
-                            filename = os.path.basename(file_path)
-                            name_without_ext = os.path.splitext(filename)[0]
-
-                            print(f"🔍 JSON 검색 시작: {filename} -> {name_without_ext}.json")
-
-                            # 개선된 JSON 후보 경로들
-                            json_candidates = []
-
-                            # 기본 패턴들
-                            json_candidates.extend([
-                                os.path.join(self.json_base, name_without_ext + '.json'),
-                                os.path.join(self.json_base, filename + '.json'),
-                                os.path.join(self.json_base, filename),
-                                os.path.join(self.json_base, name_without_ext, name_without_ext + '.json'),
-                            ])
-
-                            # 초유연 구조 기반 오버레이 JSON 검색
-                            import re
-
-                            # CSV File_path 구조 분석
-                            csv_number_pattern = re.search(r'/(\d+)/', file_path)
-                            csv_structure = {}
-
-                            if csv_number_pattern:
-                                csv_number = csv_number_pattern.group(1)
-                                csv_structure['number'] = csv_number
-
-                                # /숫자/ 이후 경로 분석
-                                after_number = file_path.split(f'/{csv_number}/', 1)[1]
-                                path_parts = after_number.split('/')
-
-                                if len(path_parts) >= 4:
-                                    csv_structure.update({
-                                        'part1': path_parts[0],  # 0001
-                                        'part2': path_parts[1],  # Unit
-                                        'part3': path_parts[2],  # U12, U70 등
-                                        'part4': path_parts[3],  # BC, FC 등
-                                    })
-
-                            # JSON 기본 경로 구조 분석
-                            base_number_pattern = re.search(r'/test/(\d+)/', self.json_base)
-                            base_structure = {}
-
-                            if base_number_pattern:
-                                base_number = base_number_pattern.group(1)
-                                base_structure['number'] = base_number
-
-                                # 기본 경로의 나머지 부분 분석
-                                after_base_number = self.json_base.split(f'/test/{base_number}/', 1)[1]
-                                base_path_parts = after_base_number.split('/')
-
-                                if len(base_path_parts) >= 4:
-                                    base_structure.update({
-                                        'part1': base_path_parts[0],
-                                        'part2': base_path_parts[1],
-                                        'part3': base_path_parts[2],
-                                        'part4': base_path_parts[3],
-                                    })
-
-                            # 구조 기반 JSON 패턴 생성
-                            if csv_structure and base_structure:
-                                # 다양한 Unit 폴더 조합 생성
-                                unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
-                                type_folders = ['BC', 'FC', 'DC']
-
-                                for unit in unit_folders:
-                                    for type_folder in type_folders:
-                                        # JSON 구조 기반 경로 생성
-                                        json_struct_path = f"{base_number}/{base_structure.get('part2', 'Unit')}/{unit}/{type_folder}/{name_without_ext}.json"
-                                        json_candidates.append(os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", json_struct_path))
-
-                                        # /Unit 폴더에서도
-                                        unit_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "Unit", f"{name_without_ext}.json")
-                                        json_candidates.append(unit_base)
-
-                                        # /img 폴더에서도
-                                        img_base = os.path.join(self.json_base.split(f'/test/{base_number}/')[0], "test", "img", json_struct_path)
-                                        json_candidates.append(img_base)
-
-                            # 기존 방식도 유지 (폴백)
-                            number_pattern_in_base = re.search(r'/test/(\d+)/', self.json_base)
-                            if number_pattern_in_base:
-                                number_part = number_pattern_in_base.group(1)
-                                unit_base = self.json_base.replace(f'/test/{number_part}/', '/test/Unit/')
-                                json_candidates.extend([
-                                    os.path.join(unit_base, name_without_ext + '.json'),
-                                    os.path.join(unit_base, filename),
-                                ])
-
-                            # Unit 폴더 간 검색 (U0 -> U9, U12 등)
-                            if '/Unit/' in self.json_base:
-                                # Unit 폴더 목록
-                                unit_folders = ['U0', 'U1', 'U2', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15', 'U16', 'U19']
-
-                                for unit_folder in unit_folders:
-                                    # 기본 Unit 경로에서
-                                    unit_path = self.json_base.replace('/Unit/U0/', f'/Unit/{unit_folder}/')
-                                    json_candidates.extend([
-                                        os.path.join(unit_path, name_without_ext + '.json'),
-                                        os.path.join(unit_path, filename),
-                                    ])
-
-                                    # /img Unit 경로에서도
-                                    if number_pattern_in_base:
-                                        number_part = number_pattern_in_base.group(1)
-                                        img_unit_path = self.json_base.replace(f'/test/{number_part}/', '/test/img/1/').replace('/Unit/U0/', f'/Unit/{unit_folder}/')
-                                        json_candidates.extend([
-                                            os.path.join(img_unit_path, name_without_ext + '.json'),
-                                            os.path.join(img_unit_path, filename),
-                                        ])
-
-                            # 기존 Unit 기반 폴백
-                            if "Unit" in self.json_base:
-                                unit_parent = os.path.dirname(self.json_base)
-                                json_candidates.extend([
-                                    os.path.join(unit_parent, "**", name_without_ext + '.json'),
-                                    os.path.join(unit_parent, "**", filename),
-                                ])
-
-                            # Unit 폴더의 모든 하위 폴더에서 찾기
-                            for root, dirs, files in os.walk(self.json_base):
-                                for file in files:
-                                    if file == name_without_ext + '.json' or file == filename:
-                                        json_candidates.append(os.path.join(root, file))
-
-                            # 모든 후보 경로에서 검색
-                            for candidate in json_candidates:
-                                if os.path.exists(candidate):
-                                    json_file_path = candidate
-                                    print(f"✅ JSON 파일 발견: {candidate}")
-                                    break
-
-                                # glob 패턴으로 검색 (디렉토리인 경우)
-                                if os.path.isdir(os.path.dirname(candidate)):
-                                    import glob
-                                    pattern = os.path.join(os.path.dirname(candidate), "**", os.path.basename(candidate))
-                                    matches = glob.glob(pattern, recursive=True)
-                                    if matches:
-                                        json_file_path = matches[0]
-                                        print(f"✅ JSON 파일 발견 (재귀 검색): {json_file_path}")
-                                        break
-
-                    # 3. 기존 방식으로도 시도 (fallback)
-                    if json_file_path is None and self.json_base:
-                        # 상대 경로를 JSON 기본 경로와 결합
-                        combined_path = os.path.join(self.json_base, result_path_str.lstrip('/'))
-                        if combined_path.endswith('.json'):
-                            json_file_path = combined_path
-                        else:
-                            json_file_path = combined_path + '.json'
-
-                        if not os.path.exists(json_file_path):
-                            json_file_path = None
-
-                    # 3. 다양한 변형 시도
-                    if json_file_path is None:
-                        # .json 확장자 없이도 시도
-                        base_path = os.path.join(self.json_base, result_path_str.lstrip('/'))
-                        if os.path.exists(base_path):
-                            json_file_path = base_path
-                        elif os.path.exists(base_path + '.json'):
-                            json_file_path = base_path + '.json'
-
-                    if json_file_path and os.path.exists(json_file_path):
-                        overlay_info['json_path'] = json_file_path
-                        overlay_info['json_found'] = True
-                        details = extract_detail_from_json(json_file_path)
-                        overlay_info['details'] = details
-
-                        # bbox 정보 추출
-                        bboxes = extract_bbox_from_json(json_file_path)
-                        overlay_info['bboxes'] = bboxes
-                        print(f"📦 bbox 추출 완료: {len(bboxes)}개 (JSON: {json_file_path})")
-                        if bboxes:
-                            print(f"🎯 bbox 데이터 발견!")
-                            for i, bbox in enumerate(bboxes[:3]):  # 처음 3개만 출력
-                                print(f"   bbox[{i}]: {bbox['label']} at {bbox['bbox']} (score: {bbox['score']:.3f})")
-                        else:
-                            print(f"⚠️ bbox 데이터 없음")
-
-                        # 런랭스 마스크 정보 추출
-                        annotations, image_size = self._extract_run_length_data(json_file_path)
-                        overlay_info['annotations'] = annotations
-                        overlay_info['image_size'] = image_size
-                        overlay_info['has_overlay'] = len(annotations) > 0 or len(details) > 0 or len(bboxes) > 0
-                        print(f"✅ JSON 파일 발견: {json_file_path}")
-                        print(f"   - bbox: {len(bboxes)}개")
-                        print(f"   - annotations: {len(annotations)}개")
-                        print(f"   - details: {len(details)}개")
-                        print(f"   - has_overlay: {overlay_info['has_overlay']}")
-                    else:
-                        print(f"JSON 파일을 찾을 수 없음: {result_path_str} (기본 경로: {self.json_base})")
-
-            # Result 값도 포함
-            if "Result" in self.df.columns:
-                result_val = self.df.at[row_idx, "Result"]
-                if pd.notna(result_val):
-                    overlay_info['result'] = str(result_val)
-
-            # 현재 라벨 정보도 포함
-            current_label = self.df.at[row_idx, self.active_label_col] if self.active_label_col in self.df.columns else ""
-            if pd.notna(current_label) and str(current_label).strip():
-                overlay_info['current_label'] = str(current_label)
-
-        except Exception as e:
-            print(f"오버레이 정보 준비 중 오류: {e}")
-
         return overlay_info
+
+    def _draw_bbox_overlay(self, painter: QtGui.QPainter, overlay_info: dict, img_width: int, img_height: int):
+        """bbox 정보를 이미지 위에 사각형 오버레이로 그립니다. (기능 제거됨)"""
+        pass  # 오버레이 기능 제거됨
+
+    def _draw_run_length_overlay(self, painter: QtGui.QPainter, overlay_info: dict, img_width: int, img_height: int):
+        """런랭스 마스크를 이미지 위에 오버레이로 그립니다. (기능 제거됨)"""
+        pass  # 오버레이 기능 제거됨
 
     def _extract_run_length_data(self, json_path: str) -> tuple:
         """JSON 파일에서 런랭스 마스크 정보를 추출합니다."""
@@ -4350,21 +3990,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             else:
                 display_pixmap = pixmap
 
-            # 오버레이 정보가 있으면 추가
-            if overlay_info.get('has_overlay', False):
-                print(f"🎨 오버레이 적용 시작")
-                original_cache_key = display_pixmap.cacheKey()
-                display_pixmap = self._add_overlay_to_pixmap(display_pixmap, overlay_info)
-                new_cache_key = display_pixmap.cacheKey()
-                print(f"🎨 오버레이 적용 완료 (pixmap 변경됨: {original_cache_key != new_cache_key})")
-                
-                # 오버레이 적용 성공 시 상태창 업데이트
-                bbox_count = len(overlay_info.get('bboxes', []))
-                annotation_count = len(overlay_info.get('annotations', []))
-                if bbox_count > 0 or annotation_count > 0:
-                    self.status.showMessage(f"✅ 오버레이 적용됨: bbox {bbox_count}개, 어노테이션 {annotation_count}개", 3000)
-                else:
-                    self.status.showMessage("⚠️ 오버레이 적용됨 (데이터 없음)", 3000)
+            # JSON 오버레이는 금지됨 - 표시하지 않음
+            print(f"🎨 JSON 오버레이 표시 금지됨")
 
             if hasattr(self, 'image_label') and self.image_label is not None:
                 try:
@@ -5713,12 +5340,10 @@ def _get_saved_settings_from_qsettings() -> dict:
         settings = QtCore.QSettings("rtm", "inference_labeler")
         csv_path = settings.value("last_csv_path", "", type=str)
         images_base = settings.value("last_images_base", "", type=str)
-        json_base = settings.value("last_json_base", "", type=str)
         csv_type = settings.value("last_csv_type", "report", type=str)
         return {
             "csv_path": csv_path,
             "images_base": images_base,
-            "json_base": json_base,
             "csv_type": csv_type,
         }
     except Exception as e:
@@ -5737,7 +5362,7 @@ def main():
         print("🚀 --use-saved 플래그 감지: 저장된 설정으로 바로 메인 UI 실행")
         app = QtWidgets.QApplication(sys.argv)
         saved = _get_saved_settings_from_qsettings()
-        print(f"📊 저장된 설정: CSV={saved['csv_path']}, 이미지={saved['images_base']}, JSON={saved['json_base']}, 타입={saved['csv_type']}")
+        print(f"📊 저장된 설정: CSV={saved['csv_path']}, 이미지={saved['images_base']}, 타입={saved['csv_type']}")
         if not saved["csv_path"]:
             print("❌ 저장된 CSV 경로가 없습니다. 기본 흐름으로 진행합니다.")
         else:
@@ -5767,7 +5392,7 @@ def main():
     # 설정값 가져오기
     print("📋 설정값 가져오기...")
     settings = setup_window.get_settings()
-    print(f"📊 설정값: CSV={settings['csv_path']}, 이미지={settings['images_base']}, JSON={settings['json_base']}, 타입={settings['csv_type']}")
+    print(f"📊 설정값: CSV={settings['csv_path']}, 이미지={settings['images_base']}, 타입={settings['csv_type']}")
 
     # 설정된 경로 확인
     print("🔍 경로 존재 여부 확인...")
@@ -5785,9 +5410,6 @@ def main():
         print(f"⚠️ 이미지 디렉토리 없음: {settings['images_base']}")
         QtWidgets.QMessageBox.warning(None, "경고", f"이미지 디렉토리를 찾을 수 없음: {settings['images_base']}")
 
-    if not os.path.exists(settings["json_base"]):
-        print(f"⚠️ JSON 디렉토리 없음: {settings['json_base']}")
-        QtWidgets.QMessageBox.warning(None, "경고", f"JSON 디렉토리를 찾을 수 없음: {settings['json_base']}")
 
     print("💾 설정값 저장 중...")
     # 설정 창에서 경로 설정을 QSettings에 저장
