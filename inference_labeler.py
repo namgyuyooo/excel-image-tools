@@ -30,7 +30,6 @@ CSV_CONFIGS = {
     "report": {
         "csv_path": "",  # 동적으로 설정됨
         "images_base": "",  # 동적으로 설정됨
-        "json_base": ""  # 동적으로 설정됨
     }
 }
 
@@ -57,16 +56,6 @@ def auto_detect_paths(csv_path: str) -> dict:
         csv_dir,  # CSV 파일과 같은 디렉토리
     ]
 
-    # 가능한 JSON 경로 후보들
-    json_candidates = [
-        os.path.join(csv_dir, "json"),
-        os.path.join(csv_dir, "result"),
-        os.path.join(csv_dir, "Unit"),  # Unit 폴더
-        os.path.join(csv_dir, "1"),  # /1/ 구조
-        os.path.join(csv_dir, "1", "0001"),  # /1/0001/ 구조
-        csv_dir,  # CSV 파일과 같은 디렉토리
-    ]
-
     # 이미지 경로 탐색
     images_base = None
     for candidate in image_candidates:
@@ -81,31 +70,14 @@ def auto_detect_paths(csv_path: str) -> dict:
                 print(f"✅ 이미지 경로 발견: {candidate} ({len(image_files)}개 파일)")
                 break
 
-    # JSON 경로 탐색
-    json_base = None
-    for candidate in json_candidates:
-        if os.path.exists(candidate):
-            # JSON 파일이 있는지 확인
-            json_files = glob.glob(os.path.join(candidate, "**", "*.json"), recursive=True)
-
-            if json_files:
-                json_base = candidate
-                print(f"✅ JSON 경로 발견: {candidate} ({len(json_files)}개 파일)")
-                break
-
     # 기본값 설정 (발견되지 않은 경우)
     if not images_base:
         images_base = csv_dir
         print(f"⚠️ 이미지 경로를 찾을 수 없어 기본값 사용: {images_base}")
 
-    if not json_base:
-        json_base = csv_dir
-        print(f"⚠️ JSON 경로를 찾을 수 없어 기본값 사용: {json_base}")
-
     return {
         "csv_path": csv_path,
-        "images_base": images_base,
-        "json_base": json_base
+        "images_base": images_base
     }
 
 def detect_csv_type(csv_path: str) -> str:
@@ -537,7 +509,6 @@ class SetupWindow(QtWidgets.QDialog):
         # 설정값
         self.csv_path = ""
         self.images_base = ""
-        self.json_base = ""
         self.csv_type = "report"
         
         self._build_ui()
@@ -620,26 +591,6 @@ class SetupWindow(QtWidgets.QDialog):
         images_layout.addLayout(images_path_layout)
         layout.addWidget(images_group)
 
-        # JSON 폴더 선택
-        json_group = QtWidgets.QGroupBox("JSON 폴더 선택")
-        json_layout = QtWidgets.QVBoxLayout(json_group)
-
-        json_info = QtWidgets.QLabel("JSON 파일들이 저장된 폴더를 선택하세요.")
-        json_layout.addWidget(json_info)
-
-        json_path_layout = QtWidgets.QHBoxLayout()
-        self.json_path_edit = QtWidgets.QLineEdit()
-        self.json_path_edit.setPlaceholderText("JSON 폴더 경로를 입력하거나 선택하세요")
-        self.json_path_edit.setReadOnly(True)
-        json_path_layout.addWidget(self.json_path_edit)
-
-        self.json_browse_btn = QtWidgets.QPushButton("폴더 찾기")
-        self.json_browse_btn.clicked.connect(self._browse_json)
-        json_path_layout.addWidget(self.json_browse_btn)
-
-        json_layout.addLayout(json_path_layout)
-        layout.addWidget(json_group)
-        
         # CSV 타입 선택 (리포트 단일로 고정)
         type_group = QtWidgets.QGroupBox("CSV 타입 설정")
         type_layout = QtWidgets.QVBoxLayout(type_group)
@@ -715,7 +666,6 @@ class SetupWindow(QtWidgets.QDialog):
 
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
-        self.json_path_edit.setText(self.json_base)
 
         self._update_test_button_state()
         
@@ -727,7 +677,6 @@ class SetupWindow(QtWidgets.QDialog):
         self.load_paths_from_settings()
         self.csv_path_edit.setText(self.csv_path)
         self.images_path_edit.setText(self.images_base)
-        self.json_path_edit.setText(self.json_base)
             
         self._update_test_button_state()
         print("저장된 경로 설정이 복원되었습니다.")
@@ -737,7 +686,6 @@ class SetupWindow(QtWidgets.QDialog):
         settings = QtCore.QSettings("rtm", "inference_labeler")
         last_csv_path = settings.value("last_csv_path", "")
         last_images_base = settings.value("last_images_base", "")
-        last_json_base = settings.value("last_json_base", "")
         
         if last_csv_path and os.path.exists(last_csv_path):
             self.csv_path = last_csv_path
@@ -747,9 +695,6 @@ class SetupWindow(QtWidgets.QDialog):
             self.images_base = last_images_base
             self.images_path_edit.setText(self.images_base)
             
-        if last_json_base and os.path.exists(last_json_base):
-            self.json_base = last_json_base
-            self.json_path_edit.setText(self.json_base)
             
         if self.csv_path != CSV_CONFIGS[self.csv_type]["csv_path"] or \
            self.images_base != CSV_CONFIGS[self.csv_type]["images_base"] or \
@@ -787,23 +732,11 @@ class SetupWindow(QtWidgets.QDialog):
             self.images_path_edit.setText(folder_path)
             self._update_test_button_state()
 
-    def _browse_json(self):
-        """JSON 폴더 찾기"""
-        folder_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "JSON 폴더 선택",
-            os.path.expanduser("~/Downloads")
-        )
-
-        if folder_path:
-            self.json_base = folder_path
-            self.json_path_edit.setText(folder_path)
-            self._update_test_button_state()
     
     def _update_test_button_state(self):
         """테스트 버튼 활성화 상태 업데이트"""
-        can_test = bool(self.csv_path and self.images_base and self.json_base and
-                       os.path.exists(self.csv_path) and os.path.exists(self.images_base) and os.path.exists(self.json_base))
+        can_test = bool(self.csv_path and self.images_base and
+                       os.path.exists(self.csv_path) and os.path.exists(self.images_base))
         self.test_btn.setEnabled(can_test)
     
     def _run_matching_test(self):
@@ -1075,28 +1008,24 @@ class SetupWindow(QtWidgets.QDialog):
         settings = QtCore.QSettings("rtm", "inference_labeler")
         settings.setValue("last_csv_path", self.csv_path)
         settings.setValue("last_images_base", self.images_base)
-        settings.setValue("last_json_base", self.json_base)
         settings.setValue("last_csv_type", self.csv_type)
-        print(f"경로 설정 저장됨: CSV={self.csv_path}, 이미지={self.images_base}, JSON={self.json_base}")
+        print(f"경로 설정 저장됨: CSV={self.csv_path}, 이미지={self.images_base}")
 
     def load_paths_from_settings(self):
         """QSettings에서 마지막 경로 설정을 로드"""
         settings = QtCore.QSettings("rtm", "inference_labeler")
         last_csv_path = settings.value("last_csv_path", "")
         last_images_base = settings.value("last_images_base", "")
-        last_json_base = settings.value("last_json_base", "")
         last_csv_type = settings.value("last_csv_type", "report")
         
         if last_csv_path and os.path.exists(last_csv_path):
             self.csv_path = last_csv_path
         if last_images_base and os.path.exists(last_images_base):
             self.images_base = last_images_base
-        if last_json_base and os.path.exists(last_json_base):
-            self.json_base = last_json_base
         if last_csv_type == "report":
             self.csv_type = last_csv_type
             
-        print(f"저장된 경로 설정 로드됨: CSV={self.csv_path}, 이미지={self.images_base}, JSON={self.json_base}")
+        print(f"저장된 경로 설정 로드됨: CSV={self.csv_path}, 이미지={self.images_base}")
 
     def accept(self):
         """라벨링 시작 버튼 클릭 시 설정값 검증"""
@@ -1109,9 +1038,6 @@ class SetupWindow(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(self, "오류", "이미지 폴더를 찾을 수 없거나 선택되지 않았습니다.")
             return
 
-        if not self.json_base or not os.path.exists(self.json_base):
-            QtWidgets.QMessageBox.critical(self, "오류", "JSON 폴더를 찾을 수 없거나 선택되지 않았습니다.")
-            return
 
         # 모든 검증 통과 시 부모의 accept() 호출
         super().accept()
@@ -1683,12 +1609,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         pass  # 현재는 빈 함수로 두고 나중에 구현
 
 
-                print("✅ 이미지 다시 로드 완료")
-            else:
-                print("⚠️ 유효한 이미지 인덱스가 없음")
-        else:
-            print("⚠️ 현재 인덱스나 데이터프레임이 없음")
-
     def _create_status_widgets(self) -> None:
         """Create status bar widgets for real-time information display"""
         # Create status widgets
@@ -1799,7 +1719,7 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         """Create progress dashboard with statistics"""
         dashboard = QtWidgets.QWidget()
 
-        dashboard.setMaximumHeight(80)
+        dashboard.setMaximumHeight(120)
         
         layout = QtWidgets.QVBoxLayout(dashboard)
         layout.setSpacing(4)
@@ -1822,7 +1742,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         
         # Stats label
         self.stats_label = QtWidgets.QLabel("로딩 중...")
-        self.stats_label.setStyleSheet("font-size: 12px; color: #424242; min-width: 200px;")
+        self.stats_label.setStyleSheet("font-size: 11px; color: #424242; min-width: 200px;")
+        self.stats_label.setWordWrap(True)
         progress_layout.addWidget(self.stats_label, 1)
         
         layout.addLayout(progress_layout)
@@ -1971,13 +1892,43 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                     if pd.notna(label) and label != "":
                         label_stats[str(label)] = int(count)
             
+            # Calculate requested statistics
+            result_ok_count = 0
+            result_ok_label_ok_count = 0
+            label_ok_count = 0
+
+            # 1. 전체 vs result ok 비율
+            if "Result" in self.df.columns:
+                result_ok_mask = self.df["Result"] == "OK"
+                result_ok_count = result_ok_mask.sum()
+
+            # 2. result ok vs label ok 비율 (Result가 OK이고 Manual_Label도 OK인 경우)
+            if "Result" in self.df.columns and self.active_label_col in self.df.columns:
+                result_ok_mask = self.df["Result"] == "OK"
+                label_ok_mask = self.df[self.active_label_col] == "OK"
+                result_ok_label_ok_count = (result_ok_mask & label_ok_mask).sum()
+
+            # 3. 전체 vs label ok 비율
+            if self.active_label_col in self.df.columns:
+                label_ok_mask = self.df[self.active_label_col] == "OK"
+                label_ok_count = label_ok_mask.sum()
+
             # Create stats text
             remaining = total_items - labeled_count
             filtered_total = len(self.filtered_indices) if self.filtered_indices else 0
-            
+
             stats_text = f"✅ {labeled_count:,} 완료 | ⏳ {remaining:,} 남음 | 🎯 {progress_percent:.1f}%"
             if filtered_total != total_items:
                 stats_text += f" | 🔍 필터됨: {filtered_total:,}/{total_items:,}"
+
+            # Add requested statistics
+            stats_text += f"\n"
+            stats_text += f"📊 전체 vs Result OK: {result_ok_count:,}/{total_items:,} ({(result_ok_count/total_items*100):.1f}%)"
+
+            if result_ok_count > 0:
+                stats_text += f" | Result OK vs Label OK: {result_ok_label_ok_count:,}/{result_ok_count:,} ({(result_ok_label_ok_count/result_ok_count*100):.1f}%)"
+
+            stats_text += f" | 전체 vs Label OK: {label_ok_count:,}/{total_items:,} ({(label_ok_count/total_items*100):.1f}%)"
             
             if hasattr(self, 'stats_label') and self.stats_label is not None:
                 try:
@@ -4205,7 +4156,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                         print(f"   - annotations: {len(annotations)}개")
                         print(f"   - details: {len(details)}개")
                         print(f"   - has_overlay: {overlay_info['has_overlay']}")
-                        print(f"   - show_overlay: {self.show_overlay}")
                     else:
                         print(f"JSON 파일을 찾을 수 없음: {result_path_str} (기본 경로: {self.json_base})")
 
@@ -4402,20 +4352,19 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
 
             # 오버레이 정보가 있으면 추가
             if overlay_info.get('has_overlay', False):
-                print(f"🎨 오버레이 적용 시작 (show_overlay: {self.show_overlay})")
+                print(f"🎨 오버레이 적용 시작")
                 original_cache_key = display_pixmap.cacheKey()
                 display_pixmap = self._add_overlay_to_pixmap(display_pixmap, overlay_info)
                 new_cache_key = display_pixmap.cacheKey()
                 print(f"🎨 오버레이 적용 완료 (pixmap 변경됨: {original_cache_key != new_cache_key})")
                 
                 # 오버레이 적용 성공 시 상태창 업데이트
-                if self.show_overlay:
-                    bbox_count = len(overlay_info.get('bboxes', []))
-                    annotation_count = len(overlay_info.get('annotations', []))
-                    if bbox_count > 0 or annotation_count > 0:
-                        self.status.showMessage(f"✅ 오버레이 적용됨: bbox {bbox_count}개, 어노테이션 {annotation_count}개", 3000)
-                    else:
-                        self.status.showMessage("⚠️ 오버레이 적용됨 (데이터 없음)", 3000)
+                bbox_count = len(overlay_info.get('bboxes', []))
+                annotation_count = len(overlay_info.get('annotations', []))
+                if bbox_count > 0 or annotation_count > 0:
+                    self.status.showMessage(f"✅ 오버레이 적용됨: bbox {bbox_count}개, 어노테이션 {annotation_count}개", 3000)
+                else:
+                    self.status.showMessage("⚠️ 오버레이 적용됨 (데이터 없음)", 3000)
 
             if hasattr(self, 'image_label') and self.image_label is not None:
                 try:
@@ -4444,7 +4393,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         """픽스맵에 오버레이 정보를 추가합니다."""
         print(f"🎨 _add_overlay_to_pixmap 시작")
         print(f"   - has_overlay: {overlay_info.get('has_overlay', False)}")
-        print(f"   - show_overlay: {self.show_overlay}")
         print(f"   - bboxes: {len(overlay_info.get('bboxes', []))}개")
         print(f"   - annotations: {len(overlay_info.get('annotations', []))}개")
 
@@ -4464,18 +4412,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
             print("✅ QPainter 생성 완료")
 
             # bbox 오버레이 먼저 그리기 (가장 아래에 표시되도록)
-            if overlay_info.get('bboxes') and self.show_overlay:
+            if overlay_info.get('bboxes'):
                 print(f"🎨 bbox 오버레이 그리기: {len(overlay_info['bboxes'])}개")
                 self._draw_bbox_overlay(painter, overlay_info, pixmap.width(), pixmap.height())
-            elif overlay_info.get('bboxes'):
-                print(f"⚠️ bbox 데이터 있지만 오버레이 꺼짐: {len(overlay_info['bboxes'])}개")
 
             # 런랭스 마스크 오버레이 그리기 (bbox 위에 표시되도록)
-            if overlay_info.get('annotations') and self.show_overlay:
+            if overlay_info.get('annotations'):
                 print(f"🎨 런랭스 오버레이 그리기: {len(overlay_info['annotations'])}개")
                 self._draw_run_length_overlay(painter, overlay_info, pixmap.width(), pixmap.height())
-            elif overlay_info.get('annotations'):
-                print(f"⚠️ 런랭스 데이터 있지만 오버레이 꺼짐: {len(overlay_info['annotations'])}개")
 
             # 폰트 설정
             font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
