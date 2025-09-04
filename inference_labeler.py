@@ -1193,8 +1193,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         # AS-IS/TO-BE mode settings
         self.as_is_tobe_mode: bool = False
 
-        # 오버레이 표시 설정
-        self.show_overlay: bool = True
         
 
         
@@ -1516,9 +1514,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         self.btn_refresh_filters.clicked.connect(self._refresh_basic_filters)
         fl.addWidget(self.btn_refresh_filters, 6, 0, 1, 2)
 
-        self.chk_show_overlay = QtWidgets.QCheckBox("JSON 오버레이 표시")
-        self.chk_show_overlay.setChecked(self.show_overlay)
-        fl.addWidget(self.chk_show_overlay, 7, 0)
 
         grp_filter_layout.addWidget(self.basic_filters_widget)
         grp_filter.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
@@ -1588,8 +1583,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         # Auto-advance
         self.chk_auto_advance.toggled.connect(self.on_auto_advance_toggled)
         
-        # Overlay toggle
-        self.chk_show_overlay.toggled.connect(self._on_overlay_toggled)
         
         # Filter controls
         self.chk_unlabeled.toggled.connect(self.apply_filters)
@@ -1665,6 +1658,14 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         act_performance_stats = memory_menu.addAction("성능 통계")
         act_performance_stats.triggered.connect(self._show_performance_stats)
 
+        # Result vs Manual Label comparison statistics
+        act_comparison_stats = memory_menu.addAction("결과 비교 통계")
+        act_comparison_stats.triggered.connect(self._show_comparison_stats)
+
+        # Overall result statistics
+        act_overall_stats = memory_menu.addAction("전체 결과 통계")
+        act_overall_stats.triggered.connect(self._show_overall_stats)
+
         # Image matching debugging
         act_image_debug = memory_menu.addAction("이미지 매칭 디버그")
         act_image_debug.triggered.connect(self._debug_image_matching)
@@ -1682,17 +1683,6 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         pass  # 현재는 빈 함수로 두고 나중에 구현
 
 
-    def _on_overlay_toggled(self, checked: bool):
-        """오버레이 표시 토글"""
-        print(f"🔄 오버레이 토글: {'켜짐' if checked else '꺼짐'}")
-        self.show_overlay = checked
-
-        # 현재 표시된 이미지가 있다면 다시 로드하여 오버레이 적용/해제
-        if hasattr(self, 'current_idx') and self.df is not None:
-            if self.current_idx < len(self.filtered_indices):
-                row_idx = self.filtered_indices[self.current_idx]
-                print(f"📸 이미지 다시 로드 중... (행: {row_idx})")
-                self._load_image_for_row(row_idx)
                 print("✅ 이미지 다시 로드 완료")
             else:
                 print("⚠️ 유효한 이미지 인덱스가 없음")
@@ -5452,6 +5442,180 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
         msg += f"남은 예상 시간: {((total_rows - labeled_rows) / labels_per_hour):.1f}시간" if labels_per_hour > 0 else "남은 시간: 계산 불가"
         
         QtWidgets.QMessageBox.information(self, "성능 통계", msg)
+
+    def _show_comparison_stats(self) -> None:
+        """Show result vs manual label comparison statistics"""
+        if self.df is None:
+            QtWidgets.QMessageBox.warning(self, "경고", "데이터가 로드되지 않았습니다.")
+            return
+
+        try:
+            # Check if required columns exist
+            manual_col = self.active_label_col
+            result_cols = []
+
+            if "Result" in self.df.columns:
+                result_cols.append("Result")
+            if "Unique_seg_result" in self.df.columns:
+                result_cols.append("Unique_seg_result")
+
+            if not result_cols:
+                QtWidgets.QMessageBox.warning(self, "경고", "비교할 결과 컬럼이 없습니다.")
+                return
+
+            # Calculate statistics
+            total_rows = len(self.df)
+            labeled_rows = len(self.df[~(self.df[manual_col].isna() | (self.df[manual_col] == ""))])
+
+            msg = f"📊 결과 비교 통계 (전체 {total_rows:,}개 행 중 {labeled_rows:,}개 라벨링됨)\n\n"
+
+            for result_col in result_cols:
+                msg += f"📈 {result_col} vs {manual_col} 비교:\n"
+
+                # Get valid comparison data (both columns have values)
+                valid_mask = (
+                    ~self.df[manual_col].isna() &
+                    (self.df[manual_col] != "") &
+                    ~self.df[result_col].isna() &
+                    (self.df[result_col] != "")
+                )
+                valid_count = valid_mask.sum()
+
+                if valid_count == 0:
+                    msg += f"  ❌ 비교 가능한 데이터 없음\n\n"
+                    continue
+
+                # Calculate matches
+                matches = 0
+                mismatches = 0
+
+                for idx in range(len(self.df)):
+                    if not valid_mask.iloc[idx]:
+                        continue
+
+                    manual_val = str(self.df.iloc[idx][manual_col]).strip()
+                    result_val = str(self.df.iloc[idx][result_col]).strip()
+
+                    # Handle different formats for comparison
+                    if result_col == "Unique_seg_result":
+                        # Parse prediction list for Unique_seg_result
+                        pred_list = parse_pred_list(result_val)
+                        if manual_val in pred_list:
+                            matches += 1
+                        else:
+                            mismatches += 1
+                    else:
+                        # Direct string comparison for other columns
+                        if manual_val == result_val:
+                            matches += 1
+                        else:
+                            mismatches += 1
+
+                match_rate = (matches / valid_count * 100) if valid_count > 0 else 0
+
+                msg += f"  ✅ 일치: {matches:,}개 ({match_rate:.1f}%)\n"
+                msg += f"  ❌ 불일치: {mismatches:,}개 ({100-match_rate:.1f}%)\n"
+                msg += f"  📋 비교 가능: {valid_count:,}개\n\n"
+
+            # Show detailed breakdown by label values
+            msg += "🔍 라벨별 세부 통계:\n"
+            if manual_col in self.df.columns:
+                label_counts = self.df[manual_col].value_counts()
+                for label, count in label_counts.items():
+                    if pd.notna(label) and label != "" and count > 0:
+                        msg += f"  • {label}: {count:,}개\n"
+
+            QtWidgets.QMessageBox.information(self, "결과 비교 통계", msg)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "오류", f"통계 계산 중 오류 발생:\n{str(e)}")
+
+    def _show_overall_stats(self) -> None:
+        """Show overall result statistics for all result columns"""
+        if self.df is None:
+            QtWidgets.QMessageBox.warning(self, "경고", "데이터가 로드되지 않았습니다.")
+            return
+
+        try:
+            total_rows = len(self.df)
+            msg = f"📊 전체 결과 통계 (총 {total_rows:,}개 행)\n\n"
+
+            # Check available result columns
+            result_columns = []
+            if "Result" in self.df.columns:
+                result_columns.append("Result")
+            if "Unique_seg_result" in self.df.columns:
+                result_columns.append("Unique_seg_result")
+            if self.active_label_col in self.df.columns:
+                result_columns.append(self.active_label_col)
+
+            if not result_columns:
+                QtWidgets.QMessageBox.warning(self, "경고", "통계에 사용할 수 있는 컬럼이 없습니다.")
+                return
+
+            # Analyze each result column
+            for col in result_columns:
+                msg += f"📈 {col} 컬럼 통계:\n"
+
+                # Count non-null values
+                non_null_count = self.df[col].notna().sum()
+                null_count = total_rows - non_null_count
+
+                msg += f"  📋 전체 데이터: {total_rows:,}개\n"
+                msg += f"  ✅ 값 있음: {non_null_count:,}개 ({non_null_count/total_rows*100:.1f}%)\n"
+                msg += f"  ❌ 값 없음: {null_count:,}개 ({null_count/total_rows*100:.1f}%)\n"
+
+                if non_null_count > 0:
+                    # Get unique values and their counts
+                    if col == "Unique_seg_result":
+                        # For Unique_seg_result, parse and count individual predictions
+                        all_predictions = []
+                        for val in self.df[col].dropna():
+                            pred_list = parse_pred_list(val)
+                            all_predictions.extend(pred_list)
+
+                        if all_predictions:
+                            pred_counts = pd.Series(all_predictions).value_counts()
+                            unique_count = len(pred_counts)
+
+                            msg += f"  🎯 고유 예측값: {unique_count:,}개\n"
+                            msg += f"  📊 총 예측 개수: {len(all_predictions):,}개\n"
+                            msg += f"  📈 평균 예측 개수/행: {len(all_predictions)/non_null_count:.1f}개\n\n"
+
+                            # Show top 10 predictions
+                            msg += "  🏆 상위 예측값:\n"
+                            for pred, count in pred_counts.head(10).items():
+                                percentage = (count / len(all_predictions)) * 100
+                                msg += f"    • {pred}: {count:,}개 ({percentage:.1f}%)\n"
+                        else:
+                            msg += "  ❌ 파싱 가능한 예측값 없음\n"
+                    else:
+                        # For other columns, simple value counts
+                        value_counts = self.df[col].value_counts()
+                        unique_count = len(value_counts)
+
+                        msg += f"  🎯 고유 값: {unique_count:,}개\n\n"
+
+                        # Show top 10 values
+                        if unique_count > 0:
+                            msg += "  🏆 상위 값:\n"
+                            for val, count in value_counts.head(10).items():
+                                percentage = (count / non_null_count) * 100
+                                val_str = str(val)[:50] + "..." if len(str(val)) > 50 else str(val)
+                                msg += f"    • {val_str}: {count:,}개 ({percentage:.1f}%)\n"
+                msg += "\n"
+
+            # Summary section
+            msg += "📋 요약:\n"
+            msg += f"• 분석된 컬럼 수: {len(result_columns)}개\n"
+            for col in result_columns:
+                filled_rate = self.df[col].notna().sum() / total_rows * 100
+                msg += f"• {col}: {filled_rate:.1f}% 데이터 존재\n"
+
+            QtWidgets.QMessageBox.information(self, "전체 결과 통계", msg)
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "오류", f"통계 계산 중 오류 발생:\n{str(e)}")
 
     def save_session_state(self) -> None:
         """Save current session state to settings"""

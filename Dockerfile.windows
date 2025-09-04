@@ -1,0 +1,19 @@
+# Windows용 크로스 빌드를 위한 Dockerfile
+FROM python:3.11-windowsservercore
+
+# 작업 디렉토리 설정
+WORKDIR /app
+
+# requirements.txt 복사 및 의존성 설치
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install pyinstaller
+
+# 소스 코드 복사
+COPY . .
+
+# PyInstaller로 실행 파일 빌드
+RUN pyinstaller --onefile --windowed --name=ExcelImageLabeler inference_labeler.py
+
+# 빌드된 파일을 볼륨으로 출력
+VOLUME ["/app/dist"]
