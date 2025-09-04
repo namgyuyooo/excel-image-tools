@@ -1996,8 +1996,8 @@ class InferenceLabelerWindow(QtWidgets.QMainWindow):
                 print(f"✅ 기존 '{self.active_label_col}' 컬럼을 제거했습니다.")
 
             # Create fresh Manual_Label column for user labeling
-                self.df[self.active_label_col] = ""
-                ensure_object_dtype(self.df, self.active_label_col)
+            self.df[self.active_label_col] = ""
+            ensure_object_dtype(self.df, self.active_label_col)
             print(f"✅ 새로운 빈 '{self.active_label_col}' 컬럼을 생성했습니다.")
             print("   이 컬럼은 사용자가 직접 라벨링한 결과를 저장합니다.")
 
